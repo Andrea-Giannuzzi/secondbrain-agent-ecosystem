@@ -337,7 +337,7 @@ class ClusterPipelineTests(unittest.TestCase):
 
     def test_sensitive_personal_names_stay_local(self):
         self.assertTrue(sensitive_name("Documenti utili/Documento Identità.pdf"))
-        self.assertTrue(sensitive_name("CV_Andrea_Giannuzzi_ultimo.pdf"))
+        self.assertTrue(sensitive_name("CV_Mario_Rossi_2024.pdf"))
         self.assertFalse(sensitive_name("Calcolo vettoriale.pdf"))
 
     def test_provider_context_redacts_personal_identifiers(self):
