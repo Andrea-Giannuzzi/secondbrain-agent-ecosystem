@@ -1,0 +1,213 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "contract_version": {
+      "const": "4.0"
+    },
+    "source_note": {
+      "type": "string",
+      "pattern": "^50_Sources/.+\\.md$"
+    },
+    "assessment": {
+      "type": "object",
+      "properties": {
+        "information_density": {
+          "type": "string",
+          "enum": [
+            "substantive",
+            "limited",
+            "non_content"
+          ]
+        },
+        "candidate_concepts": {
+          "type": "array",
+          "maxItems": 10,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 140
+          }
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1200
+        }
+      },
+      "required": [
+        "information_density",
+        "candidate_concepts",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "knowledge_actions": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "create",
+              "update",
+              "duplicate_candidate",
+              "conflict_flag",
+              "none"
+            ]
+          },
+          "target_note": {
+            "type": "string",
+            "maxLength": 300
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "source_notes": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 12,
+            "items": {
+              "type": "string",
+              "pattern": "^50_Sources/.+\\.md$"
+            }
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1600
+          }
+        },
+        "required": [
+          "action",
+          "target_note",
+          "confidence",
+          "source_notes",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "link_actions": {
+      "type": "array",
+      "maxItems": 40,
+      "items": {
+        "type": "object",
+        "properties": {
+          "from": {
+            "type": "string",
+            "maxLength": 300
+          },
+          "to": {
+            "type": "string",
+            "maxLength": 300
+          },
+          "relation": {
+            "type": "string",
+            "enum": [
+              "supports",
+              "derives",
+              "related_to",
+              "part_of",
+              "contradicts",
+              "extends",
+              "source_for",
+              "generalizes",
+              "specializes",
+              "uses"
+            ]
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000
+          }
+        },
+        "required": [
+          "from",
+          "to",
+          "relation",
+          "confidence",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "area_actions": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "create_moc",
+              "update_moc",
+              "link_to_moc",
+              "none"
+            ]
+          },
+          "area_title": {
+            "type": "string",
+            "maxLength": 140
+          },
+          "target_note": {
+            "type": "string",
+            "maxLength": 300
+          },
+          "evidence_notes": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "type": "string",
+              "maxLength": 300
+            }
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1400
+          }
+        },
+        "required": [
+          "action",
+          "area_title",
+          "target_note",
+          "evidence_notes",
+          "confidence",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "notes": {
+      "type": "string",
+      "maxLength": 1800
+    }
+  },
+  "required": [
+    "contract_version",
+    "source_note",
+    "assessment",
+    "knowledge_actions",
+    "link_actions",
+    "area_actions",
+    "notes"
+  ],
+  "additionalProperties": false
+}

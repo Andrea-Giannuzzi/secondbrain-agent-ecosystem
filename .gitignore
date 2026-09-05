@@ -1,0 +1,13 @@
+.export-receipt.json
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.DS_Store
+.env
+*.log
+*.jsonl
+*.db
+:memory:*

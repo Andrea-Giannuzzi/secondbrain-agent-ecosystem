@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dashboard — Ecosystem Control Room</title>
+  <link rel="stylesheet" href="/dashboard.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">ECOSYSTEM CONTROL ROOM</p>
+        <h1>Dashboard</h1>
+        <p class="subtitle">Gestione dell'ecosistema agentico, dei team Ruflo e del Librarian del Second Brain.</p>
+      </div>
+      <div class="hero-status">
+        <span id="overall-dot" class="status-dot"></span>
+        <div><strong id="overall-label">Connessione…</strong><small id="updated-at">—</small></div>
+      </div>
+    </header>
+
+    <nav class="section-nav" aria-label="Sezioni Dashboard">
+      <a href="#ecosystem">Ecosistema</a>
+      <a href="#ruflo-teams-section">Team Ruflo</a>
+      <a href="#provider-activity">Provider</a>
+      <a href="#agent-profiles">Profili</a>
+      <a href="#agent-configuration">Configurazione</a>
+      <a href="#librarian">Librarian / Second Brain</a>
+    </nav>
+
+    <section id="ecosystem" class="section-heading" aria-labelledby="ecosystem-title">
+      <p class="eyebrow">ECOSISTEMA</p>
+      <h2 id="ecosystem-title">Agenti, orchestrazione e attività</h2>
+      <p>Qui controlli i servizi disponibili, i team Ruflo, i profili CAO configurati e le attività osservate dei provider.</p>
+    </section>
+
+    <section class="metrics" aria-label="Panoramica ecosistema">
+      <article class="metric accent"><span>Processi orchestrati</span><strong id="active-agents">—</strong><small>CAO, Ruflo o Librarian in esecuzione</small></article>
+      <article class="metric"><span>Profili configurati</span><strong id="ecosystem-profile-count">—</strong><small id="configured-agents">—</small></article>
+      <article class="metric"><span>Team Ruflo attivi</span><strong id="ruflo-team-count">—</strong><small id="ruflo-task-count">— task aperti</small></article>
+      <article class="metric"><span>Modello operativo</span><strong class="metric-word">Sequenziale</strong><small>investiga → scrive → revisiona</small></article>
+    </section>
+
+    <section id="agents" class="grid">
+      <article class="panel agents-panel">
+        <div class="panel-title"><div><p class="eyebrow">FLEET</p><h2>Provider e servizi</h2></div><span class="tag">telemetria locale</span></div>
+        <div class="agent-list">
+          <div class="agent"><span class="agent-icon violet">A</span><div><strong>Antigravity</strong><small>Provider AI per VS Code, CLI, Librarian e team</small></div><b id="antigravity-state">—</b></div>
+          <div class="agent"><span class="agent-icon cyan">C</span><div><strong>Codex</strong><small>Provider AI per VS Code, CLI, Librarian e team</small></div><b id="codex-state">—</b></div>
+          <div class="agent"><span class="agent-icon amber">R</span><div><strong>Ruflo</strong><small>Registro team, task e memoria verificata</small></div><b id="ruflo-state">—</b></div>
+          <div class="agent"><span class="agent-icon green">P</span><div><strong>Python Executor</strong><small>Validazione, Markdown e transazioni del Librarian</small></div><b>Locale</b></div>
+        </div>
+        <p class="provider-note">L'attività generale usa soltanto data e ora dei file di sessione, senza leggere prompt o risposte. La quota descrive solo l’ultimo tentativo verificato, senza garanzia sullo stato presente; soltanto una quota esaurita richiede l'handoff.</p>
+      </article>
+
+      <article class="panel">
+        <div class="panel-title"><div><p class="eyebrow">CONTINUITY MODEL</p><h2>Ruoli e failover</h2></div><span class="tag">continuità controllata</span></div>
+        <p class="control-copy">Codex e Antigravity possono ricoprire tutti i ruoli. Le fasi restano sequenziali e il progetto reale ha un solo writer alla volta.</p>
+        <div class="service-line"><span>Coordinatore + writer</span><b>Provider VS Code corrente</b></div>
+        <div class="service-line"><span>Handoff per quota</span><b>L'altro provider subentra</b></div>
+        <div class="service-line"><span>Investigatore</span><b>Fallback tra provider disponibili</b></div>
+        <div class="service-line"><span>Revisore</span><b>Provider diverso, se disponibile</b></div>
+        <div class="service-line"><span>Revisione di emergenza</span><b>Stesso provider · fallback degradato</b></div>
+      </article>
+    </section>
+
+    <section id="ruflo-teams-section" class="panel table-panel">
+      <div class="panel-title"><div><p class="eyebrow">RUFLO TEAM</p><h2>Team, ruoli e task</h2></div><span id="ruflo-quota-state" class="tag">—</span></div>
+      <p class="reasons-copy">Apri un team e poi un ruolo per vedere responsabilità, task assegnata e provider. Se il provider della sessione termina la quota, l'altro agente VS Code rileva il team persistente e assume coordinazione e scrittura. Il provider esaurito viene escluso dalle chiamate successive di quel team.</p>
+      <div id="ruflo-teams" class="team-list"></div>
+      <p id="ruflo-teams-empty" class="empty">Nessun team Ruflo registrato.</p>
+    </section>
+
+    <section id="provider-activity" class="panel table-panel">
+      <div class="panel-title"><div><p class="eyebrow">PROVIDER ACTIVITY</p><h2>Attività generale e chiamate orchestrate</h2></div><span class="tag">metadata + Librarian + Ruflo</span></div>
+      <p class="reasons-copy">Le righe “Generale” indicano che una sessione Codex o Antigravity è stata aggiornata. Le righe Librarian e Ruflo sono chiamate AI tracciate con esito.</p>
+      <div class="table-wrap">
+        <table><thead><tr><th>Ora</th><th>Provider</th><th>Ambito</th><th>Attività</th><th>Profilo</th><th>Segnale / esito</th></tr></thead><tbody id="provider-calls-table"></tbody></table>
+      </div>
+      <details class="status-legend"><summary>Legenda segnali ed esiti</summary><dl>
+        <dt>Attività rilevata</dt><dd>È cambiato un file di sessione o log: non prova una risposta AI né quota disponibile.</dd>
+        <dt>Avviata</dt><dd>Tentativo registrato; non garantisce che sia ancora in corso.</dd>
+        <dt>Completata</dt><dd>Risposta ricevuta. Il verdetto della revisione resta distinto dal successo della chiamata.</dd>
+        <dt>Tentativo non disponibile</dt><dd>Errore di quel tentativo: rete, accesso, risposta o quota. Non è lo stato corrente del provider.</dd>
+        <dt>Quota esaurita</dt><dd>Limite rilevato nell’ultimo tentativo indicato, non una previsione della disponibilità futura.</dd>
+        <dt>Non verificato</dt><dd>Mancano elementi sufficienti per stabilire l’esito.</dd>
+        <dt>Fallback</dt><dd>Un altro provider ha eseguito il tentativo successivo.</dd>
+        <dt>Revisione con lo stesso provider</dt><dd>Fallback degradato: non è una verifica indipendente dal provider autore.</dd>
+      </dl></details>
+      <p id="provider-calls-empty" class="empty">Nessuna attività registrata.</p>
+    </section>
+
+    <section id="agent-profiles" class="panel table-panel">
+      <div class="panel-title"><div><p class="eyebrow">AGENT REGISTRY</p><h2>Profili CAO configurati</h2></div><span id="profile-count" class="tag">—</span></div>
+      <p class="reasons-copy">Un profilo è una configurazione riutilizzabile, non un agente attualmente al lavoro. “Configurato” significa caricabile, senza garantire quota; “In esecuzione” richiede una sessione osservata. I profili storici non sono disponibili al runtime attuale.</p>
+      <details class="status-legend"><summary>Come si collegano ruoli Ruflo, CAO e Librarian</summary>
+      <p>Coordinatore e writer sono l’agente della sessione VS Code o CLI: non richiedono un profilo CAO separato. Il writer è unico.</p>
+      <p>Investigatore e revisore Ruflo usano i due worker CAO in sola lettura, uno per provider. Cinque profili del Librarian gestiscono semantica, revisione semantica e memoria nella pipeline documentale autonoma.</p></details>
+      <h3 class="profile-group-title">Profili CAO correnti</h3>
+      <div id="current-profiles-list" class="profile-list"></div>
+      <details id="historical-profiles" class="profile-archive">
+        <summary><span>Profili storici</span><span id="historical-profile-count" class="tag">—</span></summary>
+        <p>Configurazioni conservate nel registro CAO per tracciabilità, ma non selezionate dal runtime corrente.</p>
+        <div id="historical-profiles-list" class="profile-list"></div>
+      </details>
+      <details id="builtin-profiles" class="profile-archive"><summary><span>Profili CAO integrati e aggiuntivi</span><span id="builtin-profile-count" class="tag">—</span></summary>
+      <p>Profili generici registrati in CAO, separati da quelli selezionati per questo ecosistema.</p><div id="builtin-profiles-list" class="profile-list"></div></details>
+    </section>
+
+    <section class="panel table-panel">
+      <div class="panel-title"><div><p class="eyebrow">CAO RUNTIME</p><h2>Sessioni orchestrate recenti</h2></div><span class="tag">sola lettura</span></div>
+      <div class="table-wrap">
+        <table><thead><tr><th>Ultima attività</th><th>Profilo</th><th>Provider</th><th>Sessione</th><th>Stato</th><th>Workspace</th></tr></thead><tbody id="cao-terminals-table"></tbody></table>
+      </div>
+      <p id="cao-terminals-empty" class="empty">Nessuna sessione CAO registrata.</p>
+    </section>
+
+    <section id="agent-configuration" class="panel table-panel">
+      <div class="panel-title"><h2>Configurazione agenti</h2><span class="tag">inventario globale · sola lettura</span></div>
+      <p id="configuration-note" class="reasons-copy"></p>
+      <div class="table-wrap"><table><thead><tr><th>Provider</th><th>Tipo</th><th>Nome</th><th>Origine</th><th>Ambito</th><th>Stato</th><th>Eventi hook</th></tr></thead><tbody id="agent-configuration-table"></tbody></table></div>
+      <p id="configuration-issues" role="status"></p><p id="hooks-note" class="provider-note"></p>
+      <details class="status-legend"><summary>Dove controllare da VS Code e terminale</summary>
+      <p>Antigravity: pannello laterale → Additional Options (…) → MCP Servers. Codex: pannello Codex; nel terminale integrato, <code>codex mcp list</code>.</p>
+      <p>Per aprire Antigravity dal terminale del progetto: <code>antigravity</code>. Dentro la sessione, <code>/help</code>; per gli MCP, <code>antigravity mcp list</code>. Gli elenchi nativi possono contenere argomenti riservati: non condividerli integralmente.</p>
+      <p>Skill Codex: <code>~/.codex/skills</code> e <code>~/.agents/skills</code>. Skill Antigravity: <code>~/.gemini/config/skills.json</code>. Hook Antigravity: <code>~/.gemini/config/hooks.json</code>. Apri i file con File → Apri file in VS Code.</p>
+      <p>Le configurazioni globali valgono per tutti i progetti. Le cartelle <code>.agents</code> dei progetti e i plugin possono aggiungere personalizzazioni: verificarle nel relativo client. Dopo l’installazione usa Developer: Reload Window e apri una nuova sessione agente.</p></details>
+    </section>
+
+    <section id="librarian" class="section-heading section-heading-librarian" aria-labelledby="librarian-title">
+      <p class="eyebrow">LIBRARIAN / SECOND BRAIN</p>
+      <h2 id="librarian-title">Ingestione, semantica e grafo</h2>
+      <p>Questa parte riguarda il servizio autonomo che trasforma i documenti in Source, Knowledge e collegamenti verificati.</p>
+    </section>
+
+    <section class="metrics" aria-label="Panoramica Librarian">
+      <article class="metric"><span>Source</span><strong id="source-total">—</strong><small id="source-organized">— organizzati</small></article>
+      <article class="metric"><span>Collegate</span><strong id="source-linked">—</strong><small id="source-unlinked">— senza nodo</small></article>
+      <article class="metric accent"><span>Pronte</span><strong id="pending-count">—</strong><small>in coda ora</small></article>
+      <article class="metric warning"><span>Backoff</span><strong id="backoff-count">—</strong><small>attesa controllata</small></article>
+      <article class="metric"><span>Knowledge</span><strong id="knowledge-count">—</strong><small>nodi concettuali</small></article>
+      <article class="metric"><span>Areas</span><strong id="area-count">—</strong><small>mappe di area</small></article>
+    </section>
+
+    <section class="pipeline" aria-labelledby="pipeline-title">
+      <div class="pipeline-title"><p class="eyebrow">PIPELINE</p><h2 id="pipeline-title">Logica Second Brain</h2></div>
+      <div class="pipeline-flow">
+        <div><span>01</span><strong>00_Drop</strong><small>Arrivo file</small></div><i>→</i>
+        <div><span>02</span><strong>Ingestor</strong><small>Estrazione locale</small></div><i>→</i>
+        <div><span>03</span><strong>Librarian</strong><small>Semantica minima</small></div><i>→</i>
+        <div><span>04</span><strong>Knowledge</strong><small>Grafo verificato</small></div>
+      </div>
+    </section>
+
+    <section class="panel controls-panel table-panel">
+      <div class="panel-title"><div><p class="eyebrow">LIBRARIAN CONTROL</p><h2>Servizio autonomo</h2></div><span id="circuit-badge" class="tag">—</span></div>
+      <p id="control-copy" class="control-copy">Caricamento stato…</p>
+      <div class="actions">
+        <button id="run-button" class="primary">Esegui ora</button>
+        <button id="pause-button">Metti in pausa</button>
+        <button id="resume-button">Riprendi</button>
+        <button id="refresh-button" class="quiet">Aggiorna</button>
+      </div>
+      <div class="service-line"><span>CAO server</span><b id="cao-state">—</b></div>
+      <div class="service-line"><span>LaunchAgent Librarian</span><b id="service-state">—</b></div>
+      <div class="service-line"><span>Fallimenti provider consecutivi</span><b id="failure-count">— / 10</b></div>
+    </section>
+
+    <section class="panel reasons-panel">
+      <div class="panel-title"><div><p class="eyebrow">COVERAGE</p><h2>Perché alcune Source non hanno un nodo</h2></div><span class="tag">triage locale · zero quota AI</span></div>
+      <p class="reasons-copy">Una Source resta consultabile anche senza diventare Knowledge. Il Librarian crea nodi solo per contenuti concettuali riutilizzabili e registra il motivo delle esclusioni.</p>
+      <div class="reason-grid">
+        <div><strong id="reason-technical_reference">—</strong><span>Tecniche o dati grezzi</span><small>Codice, log, configurazioni ed estrazioni strutturate.</small></div>
+        <div><strong id="reason-low_information">—</strong><span>Testo insufficiente</span><small>Contenuto troppo breve per un concetto affidabile.</small></div>
+        <div><strong id="reason-sensitive_reference">—</strong><span>Sensibili</span><small>Documenti personali mantenuti solo in locale.</small></div>
+        <div><strong id="reason-administrative">—</strong><span>Amministrative</span><small>Ricevute, attestati e materiale di servizio.</small></div>
+        <div><strong id="reason-pending">—</strong><span>In lavorazione</span><small>Pronte o in attesa controllata del Librarian.</small></div>
+        <div><strong id="reason-other">—</strong><span>Da verificare</span><small>Casi senza una motivazione riconosciuta.</small></div>
+      </div>
+    </section>
+
+    <section class="panel table-panel">
+      <div class="panel-title"><div><p class="eyebrow">RETRY QUEUE</p><h2>Documenti in backoff</h2></div><button id="retry-all-button" class="quiet">Riprova tutti ora</button></div>
+      <div class="table-wrap">
+        <table><thead><tr><th>Documento</th><th>Batch</th><th>Tentativi</th><th>Prossimo tentativo</th><th></th></tr></thead><tbody id="backoff-table"></tbody></table>
+      </div>
+      <p id="backoff-empty" class="empty">Nessun documento in backoff.</p>
+    </section>
+
+    <section class="panel table-panel">
+      <div class="panel-title"><div><p class="eyebrow">LIBRARIAN HISTORY</p><h2>Ultimi cluster</h2></div><span class="tag">auto-refresh 5s</span></div>
+      <div class="table-wrap">
+        <table><thead><tr><th>Ora</th><th>Cluster</th><th>Source</th><th>Provider</th><th>Esito</th></tr></thead><tbody id="runs-table"></tbody></table>
+      </div>
+    </section>
+
+    <div id="toast" role="status" aria-live="polite"></div>
+  </main>
+  <script src="/dashboard.js"></script>
+</body>
+</html>

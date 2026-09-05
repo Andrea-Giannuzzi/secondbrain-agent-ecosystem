@@ -1,0 +1,22 @@
+name: Tests
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  runtime:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: python -m pip install --require-hashes -r requirements.lock
+      - run: python -m pip install --no-deps .
+      - run: npm ci --no-audit --no-fund
+      - run: npx --no-install ruflo --version
+      - run: SBE_TEST_RUFLO_BIN="$PWD/node_modules/.bin/ruflo" python scripts/test_all.py
+      - run: node sbe/bundle/_System/Librarian/Dashboard/test_dashboard_signals.cjs
+      - run: node --check sbe/bundle/_System/Librarian/Dashboard/dashboard.js

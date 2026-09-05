@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "secondbrain-agent-ecosystem"
+version = "0.1.0"
+description = "Local Second Brain, Librarian and bounded Codex–Antigravity teams"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+dependencies = ["mcp==2.1.1", "qdrant-client==1.19.0", "fastembed==0.8.0", "onnxruntime==1.29.0", "jsonschema==4.26.0", "tomlkit==0.13.3"]
+
+[project.scripts]
+sbe = "sbe.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["sbe*"]
+
+[tool.setuptools.package-data]
+sbe = ["bundle/**/*"]

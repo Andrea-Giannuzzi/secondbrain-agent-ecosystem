@@ -1,0 +1,146 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Second Brain minimal cluster semantics v1",
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": "semantic-1.0"
+    },
+    "cluster_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "concepts": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^c[1-9][0-9]*$"
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "existing_knowledge_id": {
+            "type": ["string", "null"],
+            "pattern": "^k[1-9][0-9]*$"
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0.75,
+            "maximum": 1
+          }
+        },
+        "required": ["id", "label", "existing_knowledge_id", "confidence"],
+        "additionalProperties": false
+      }
+    },
+    "source_concepts": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "properties": {
+          "source_id": {
+            "type": "string",
+            "pattern": "^s[1-9][0-9]*$"
+          },
+          "concept_ids": {
+            "type": "array",
+            "maxItems": 10,
+            "items": {
+              "type": "string",
+              "pattern": "^c[1-9][0-9]*$"
+            },
+            "uniqueItems": true
+          }
+        },
+        "required": ["source_id", "concept_ids"],
+        "additionalProperties": false
+      }
+    },
+    "relations": {
+      "type": "array",
+      "maxItems": 40,
+      "items": {
+        "type": "object",
+        "properties": {
+          "from_concept": {
+            "type": "string",
+            "pattern": "^c[1-9][0-9]*$"
+          },
+          "to_concept": {
+            "type": "string",
+            "pattern": "^c[1-9][0-9]*$"
+          },
+          "relation": {
+            "type": "string",
+            "enum": [
+              "supports",
+              "derives",
+              "related_to",
+              "part_of",
+              "contradicts",
+              "extends",
+              "generalizes",
+              "specializes",
+              "uses"
+            ]
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          }
+        },
+        "required": ["from_concept", "to_concept", "relation", "confidence"],
+        "additionalProperties": false
+      }
+    },
+    "area_proposal": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "properties": {
+            "label": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 80
+            },
+            "existing_area_id": {
+              "type": ["string", "null"],
+              "pattern": "^a[1-9][0-9]*$"
+            },
+            "concept_ids": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 10,
+              "items": {
+                "type": "string",
+                "pattern": "^c[1-9][0-9]*$"
+              },
+              "uniqueItems": true
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          },
+          "required": ["label", "existing_area_id", "concept_ids", "confidence"],
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "required": ["version", "cluster_id", "concepts", "source_concepts", "relations", "area_proposal"],
+  "additionalProperties": false
+}

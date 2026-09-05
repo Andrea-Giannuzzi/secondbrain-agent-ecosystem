@@ -1,0 +1,9 @@
+Second Brain Agent Ecosystem
+Copyright 2026 Andrea Giannuzzi
+
+This project's integration code is licensed under Apache-2.0.
+Ruflo (MIT), CLI Agent Orchestrator, Python/Node dependencies and embedding
+models retain their own licenses. Provider clients Codex and Antigravity are
+external prerequisites governed by their respective distribution and usage
+terms. No provider binaries, authentication files or private vault content
+are included. Names are used to describe compatibility, without endorsement.
