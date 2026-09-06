@@ -2,7 +2,7 @@
 
 A local macOS dashboard, document Librarian, semantic search and bounded Claude–Codex–Antigravity teams coordinated through Ruflo and CLI Agent Orchestrator (CAO).
 
-**Release candidate 0.1.0.** See [verification status](docs/verification.md) before relying on a feature. [Guida completa in italiano](docs/it/README.md).
+**Release candidate 0.1.1.** See [verification status](docs/verification.md) before relying on a feature. [Guida completa in italiano](docs/it/README.md).
 
 ## What runs where
 

@@ -507,7 +507,7 @@ def deploy(home, vault, python, providers, executables, bundle=BUNDLE, services=
                         tx.write(home/".aws/cli-agent-orchestrator/skills"/file.relative_to(bundle/"Librarian/Skills"),file.read_bytes())
                 for label, data in plists.items():
                     tx.write(home/"Library/LaunchAgents"/(label+".plist"),data)
-                settings={"vault":str(vault),"python":str(python),"providers":providers,"version":"0.1.0","env":env}
+                settings={"vault":str(vault),"python":str(python),"providers":providers,"version":"0.1.1","env":env}
                 tx.write(root(home)/"config.json",(json.dumps(settings,indent=2)+"\n").encode())
                 cli = ("#!/bin/sh\nexec "+shlex.quote(str(python))+" -m sbe.cli \"$@\"\n").encode()
                 tx.write(home/".local/bin/sbe",cli,mode=0o700,protected=True)

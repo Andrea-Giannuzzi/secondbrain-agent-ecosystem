@@ -1,19 +1,7 @@
 # Changelog
 
-## 0.1.0 — unreleased
+## 0.1.1 — 2026-09-06
 
-- Initial macOS distribution candidate of local document ingestion, Librarian,
-  semantic search, bounded Ruflo/CAO teams and dashboard.
-- Positive-allowlist export from private canonical sources.
-- Guided bootstrap, safe diagnostics, transactional deployment and conservative
-  uninstall, preserving indexes, queues and private audit.
-- Technical Drop files are ignored without deletion; relation titles are redacted.
-- Canonical and evidence searches recheck current file access; indexing rejects
-  external symlinks and extracted-text paths outside the designated directory.
-- Python and Node dependencies are locked; command conflicts and interrupted
-  uninstall/export preserve previous files. ONNX runtime telemetry is disabled.
-- Ruflo initialization and memory operations share one configured database
-  directory; existing databases are not reinitialized or moved.
 - Claude Code joins Codex and Antigravity as a full provider: CAO worker and
   Librarian profiles, client skills, policy and MCP registration through its own
   CLI. Role assignment follows the session provider — Antigravity investigates
@@ -36,3 +24,19 @@
   prompt they cannot answer: the staging directory is declared trusted for the
   duration of the step and the declaration is withdrawn afterwards, in both the
   team bridge and the unattended Librarian.
+
+## 0.1.0 — 2026-09-06
+
+
+- Initial macOS distribution candidate of local document ingestion, Librarian,
+  semantic search, bounded Ruflo/CAO teams and dashboard.
+- Positive-allowlist export from private canonical sources.
+- Guided bootstrap, safe diagnostics, transactional deployment and conservative
+  uninstall, preserving indexes, queues and private audit.
+- Technical Drop files are ignored without deletion; relation titles are redacted.
+- Canonical and evidence searches recheck current file access; indexing rejects
+  external symlinks and extracted-text paths outside the designated directory.
+- Python and Node dependencies are locked; command conflicts and interrupted
+  uninstall/export preserve previous files. ONNX runtime telemetry is disabled.
+- Ruflo initialization and memory operations share one configured database
+  directory; existing databases are not reinitialized or moved.
