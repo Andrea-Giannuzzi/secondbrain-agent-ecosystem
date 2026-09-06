@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from configure_agent_access import install_antigravity_access, configure_cli_alias, configure_antigravity, configure_codex_mcp_approval, install_policy
+from configure_agent_access import install_antigravity_access, install_claude_access, configure_cli_alias, configure_antigravity, configure_codex_mcp_approval, grant_claude_workspace_trust, install_policy, verify_claude_mcp
 
 
 class ConfigureAgentAccessTests(unittest.TestCase):
@@ -92,6 +92,69 @@ class GlobalAccessTests(unittest.TestCase):
             self.assertEqual(len(json.loads(first)['entries']),2)
             self.assertEqual((home/'.local/bin/antigravity').resolve(),agy.resolve())
             self.assertEqual((home/'.gemini/config/skills/secondbrain-ecosystem/ruflo-team/SKILL.md').stat().st_mode & 0o777,0o600)
+
+    def test_claude_access_installs_private_skills_and_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / "home"
+            source = Path(temp) / "skills"
+            for name in ("secondbrain-consult", "ruflo-team"):
+                (source / name).mkdir(parents=True)
+                (source / name / "SKILL.md").write_text(f"---\nname: {name}\n---\n")
+            install_claude_access(home, source)
+            install_claude_access(home, source)
+            root = home / ".claude/skills"
+            self.assertEqual(root.stat().st_mode & 0o777, 0o700)
+            for name in ("secondbrain-consult", "ruflo-team"):
+                skill = root / name / "SKILL.md"
+                self.assertIn(name, skill.read_text())
+                self.assertEqual(skill.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(skill.parent.stat().st_mode & 0o777, 0o700)
+
+    def test_claude_mcp_verification_reads_without_rewriting(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config = Path(temp) / ".claude.json"
+            config.write_text(json.dumps({
+                "projects": {"/keep": {"history": []}},
+                "mcpServers": {"secondbrain": {"type": "stdio", "command": "/runtime/secondbrain-mcp"}},
+            }))
+            before = config.read_bytes()
+            verify_claude_mcp(config, {"secondbrain": "/runtime/secondbrain-mcp"})
+            self.assertEqual(before, config.read_bytes())
+            with self.assertRaisesRegex(ValueError, "not registered"):
+                verify_claude_mcp(config, {"ruflo-team": "/runtime/ruflo-team-mcp"})
+            with self.assertRaisesRegex(ValueError, "not registered"):
+                verify_claude_mcp(config, {"secondbrain": "/other/secondbrain-mcp"})
+            config.write_text("{}")
+            with self.assertRaisesRegex(ValueError, "mcpServers is missing"):
+                verify_claude_mcp(config, {"secondbrain": "/runtime/secondbrain-mcp"})
+
+    def test_workspace_trust_is_scoped_idempotent_and_preserves_history(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = root / ".claude.json"
+            config.write_text(json.dumps({
+                "projects": {"/keep": {"hasTrustDialogAccepted": True, "history": ["x"]}},
+                "mcpServers": {"caveman": {"command": "keep"}},
+            }))
+            runs = root / "TeamRuns"
+            self.assertTrue(grant_claude_workspace_trust(config, [runs]))
+            # A second run changes nothing, so a reinstall never rewrites the file.
+            self.assertFalse(grant_claude_workspace_trust(config, [runs]))
+            value = json.loads(config.read_text())
+            self.assertTrue(value["projects"][str(runs.resolve())]["hasTrustDialogAccepted"])
+            self.assertEqual(value["projects"]["/keep"], {"hasTrustDialogAccepted": True, "history": ["x"]})
+            self.assertEqual(value["mcpServers"], {"caveman": {"command": "keep"}})
+            self.assertEqual(config.stat().st_mode & 0o777, 0o600)
+
+    def test_workspace_trust_refuses_a_malformed_configuration(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config = Path(temp) / ".claude.json"
+            config.write_text("{ not json")
+            with self.assertRaisesRegex(ValueError, "not valid JSON"):
+                grant_claude_workspace_trust(config, [Path(temp) / "TeamRuns"])
+            config.write_text(json.dumps({"projects": []}))
+            with self.assertRaisesRegex(ValueError, "projects must be"):
+                grant_claude_workspace_trust(config, [Path(temp) / "TeamRuns"])
 
     def test_alias_collision_never_overwrites_user_file(self):
         with tempfile.TemporaryDirectory() as temp:

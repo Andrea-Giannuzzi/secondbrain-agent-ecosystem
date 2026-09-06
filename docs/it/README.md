@@ -1,14 +1,15 @@
 # Guida italiana
 
 Second Brain Agent Ecosystem collega una dashboard locale, il Librarian autonomo,
-la ricerca semantica e i team Codex–Antigravity coordinati da Ruflo e CAO.
+la ricerca semantica e i team Claude–Codex–Antigravity coordinati da Ruflo e CAO.
 La versione 0.1 è una candidata al rilascio: consulta [le verifiche](../verification.md).
 
 ## Prima installazione
 
 Servono macOS, Python 3.12+, Node 20+, npm, CAO con `cao-server`, tmux, Poppler e
-Tesseract. Installa e autentica almeno Codex o il client AI Antigravity `agy`.
-Con entrambi puoi ottenere una revisione fatta da un provider diverso dal writer.
+Tesseract. Installa e autentica almeno uno fra Claude Code `claude`, Codex e il
+client AI Antigravity `agy`. Con almeno due puoi ottenere una revisione fatta da un
+provider diverso dal writer.
 L'installer non effettua login né acquista quota.
 
 Se Antigravity avviato con `--print` segnala un permesso `command` negato, apri
@@ -46,8 +47,8 @@ sulla porta 8765. Per una prova usa le due note sintetiche in `examples/vault`.
 
 ## Uso quotidiano da VS Code o Terminale
 
-Apri un progetto locale e il terminale nella sua cartella. Avvia `codex` oppure
-`antigravity`. In VS Code, dopo l'installazione salva il lavoro, premi `⇧⌘P`, cerca
+Apri un progetto locale e il terminale nella sua cartella. Avvia `codex`,
+`antigravity` oppure `claude`. In VS Code, dopo l'installazione salva il lavoro, premi `⇧⌘P`, cerca
 **Developer: Reload Window**, premi Invio e apri una nuova sessione agente.
 Le sessioni già aperte possono conservare la configurazione precedente.
 
@@ -57,7 +58,7 @@ state usate: controlla le chiamate agli strumenti e i team nella dashboard.
 
 Per richiederle esplicitamente nella chat:
 
-| Scopo | Codex | Antigravity |
+| Scopo | Codex | Antigravity / Claude |
 | --- | --- | --- |
 | Consultare note | `$secondbrain-consult Cerca il concetto e cita i percorsi.` | `/secondbrain-consult Cerca il concetto e cita i percorsi.` |
 | Team di lavoro | `$ruflo-team Investiga, implementa e revisiona: …` | `/ruflo-team Investiga, implementa e revisiona: …` |
@@ -67,6 +68,7 @@ Puoi inviare il primo prompt dal terminale:
 ```sh
 codex -C "$PWD" '$ruflo-team Investiga, implementa e revisiona la richiesta seguente.'
 antigravity --prompt-interactive '/ruflo-team Investiga, implementa e revisiona la richiesta seguente.'
+claude '/ruflo-team Investiga, implementa e revisiona la richiesta seguente.'
 ```
 
 Gli apici singoli impediscono alla shell di interpretare `$ruflo-team`.
@@ -81,24 +83,36 @@ non è una ricerca web: consulta le note locali attraverso il server `secondbrai
 - Il provider della sessione è coordinatore e unico writer del progetto.
 - Ruflo registra team, task, avanzamento e risultati revisionati.
 - CAO esegue investigatore e revisore su copie redatte, senza autorizzarli a scrivere nel progetto.
-- Il revisore preferisce il provider opposto al writer; se resta un solo provider,
-  la dashboard indica la revisione come degradata.
+- I due provider che non scrivono si dividono gli altri ruoli. Antigravity è
+  l'investigatore preferito quando non coordina; revisiona il ragionatore che non ha
+  scritto il codice:
+
+  | Sessione | Investigatore | Revisore |
+  | --- | --- | --- |
+  | Claude | Antigravity | Codex |
+  | Codex | Antigravity | Claude |
+  | Antigravity | Codex | Claude |
+
+  Sono preferenze: se il designato non è disponibile subentra il candidato successivo,
+  e solo quando non resta alcun provider indipendente la revisione ricade sull'autore.
+  In quel caso la dashboard la indica come degradata.
 - Il Librarian elabora autonomamente i documenti; il suo Executor deterministico
   applica le modifiche validate al vault, con transazioni e backup.
 - Gli agenti di programmazione consultano il vault tramite MCP in sola lettura.
 
 Quattro ruoli non significano quattro intelligenze attive contemporaneamente.
-I sette profili correnti comprendono cinque profili Librarian e due worker Ruflo;
+I dieci profili correnti comprendono sette profili Librarian e tre worker Ruflo;
 si installano quelli relativi ai provider presenti. Gli storici e quelli CAO integrati
 vanno letti separatamente.
 
 ## Quota e ripresa
 
-Il fallback di Librarian e worker CAO prova un provider alternativo ammesso.
-Quando entrambi falliscono, i circuiti limitano i tentativi. Un errore di rete non
+Il fallback di Librarian e worker CAO prova i provider alternativi ammessi; il
+Librarian ruota inoltre la testa della catena a ogni ciclo, così i tre si dividono il
+carico. Quando falliscono tutti, i circuiti limitano i tentativi. Un errore di rete non
 dimostra che la quota sia esaurita.
 
-Se termina la quota del writer, apri l'altro provider nella stessa cartella e scrivi:
+Se termina la quota del writer, apri un altro provider nella stessa cartella e scrivi:
 
 > Usa ruflo-team. Il writer precedente ha restituito un errore confermato di quota
 > esaurita. Elenca i team attivi, prendi in carico quello relativo a questo progetto
@@ -147,7 +161,10 @@ o regole specifiche del progetto. SSH, container e altri host non ricevono autom
 questi runtime. In VS Code consulta il pannello del provider; per Antigravity verifica
 il menu `… → MCP Servers`, se disponibile nella versione installata.
 Skill Codex: `~/.codex/skills`; skill Antigravity: `~/.gemini/config/skills.json`;
-policy Antigravity: `~/.gemini/GEMINI.md`. Non vengono aggiunti hook globali.
+skill Claude: `~/.claude/skills`. Policy Antigravity: `~/.gemini/GEMINI.md`; policy
+Claude: `~/.claude/CLAUDE.md`. I server MCP di Claude sono registrati dal suo CLI in
+`~/.claude.json`, che l'installer non riscrive mai direttamente. Non vengono aggiunti
+hook globali.
 
 ## Aggiornamenti e protezione dei dati
 

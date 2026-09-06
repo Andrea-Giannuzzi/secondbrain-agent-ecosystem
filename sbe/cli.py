@@ -42,7 +42,7 @@ def module(name):
 
 def doctor():
     rows=[]
-    for name,cmd in (("codex","codex"),("antigravity","agy"),("CAO","cao"),("Node.js","node")):
+    for name,cmd in (("codex","codex"),("antigravity","agy"),("claude","claude"),("CAO","cao"),("Node.js","node")):
         binary=shutil.which(cmd)
         version=None
         if binary:
@@ -54,7 +54,7 @@ def doctor():
                 pass
         rows.append({"name":name,"installed":bool(binary),"version":version,"authentication":"not_verified","quota":"not_verified"})
     # Read only known server names/status, never print native MCP list output.
-    for provider,path,table in (("codex",Path.home()/".codex/config.toml","mcp_servers"),("antigravity",Path.home()/".gemini/config/mcp_config.json","mcpServers")):
+    for provider,path,table in (("codex",Path.home()/".codex/config.toml","mcp_servers"),("antigravity",Path.home()/".gemini/config/mcp_config.json","mcpServers"),("claude",Path.home()/".claude.json","mcpServers")):
         try:
             if path.is_symlink():
                 raise ValueError()
@@ -96,8 +96,8 @@ def main():
         elif args.group=="install":
             if sys.platform!="darwin":
                 raise ValueError("macOS required")
-            executables={x:shutil.which(x) for x in ("codex","agy","cao","cao-server","node","tmux")}
-            providers=[p for p,c in (("codex","codex"),("antigravity","agy")) if executables[c]]
+            executables={x:shutil.which(x) for x in ("codex","agy","claude","cao","cao-server","node","tmux")}
+            providers=[p for p,c in (("codex","codex"),("antigravity","agy"),("claude","claude")) if executables[c]]
             if not providers or any(not executables[x] for x in ("cao","cao-server","node","tmux")):
                 raise ValueError("Missing prerequisites")
             result=deploy(Path.home(),args.vault,Path(sys.executable),providers,{k:v for k,v in executables.items() if v},adopt=args.adopt_existing)

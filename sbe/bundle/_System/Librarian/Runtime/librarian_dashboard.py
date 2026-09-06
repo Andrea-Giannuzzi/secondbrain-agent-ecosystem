@@ -36,6 +36,7 @@ ORGANIZER = APP / "brain-cluster-organize"
 RUFLO_ROOT = Path("~/Library/Application Support/SecondBrainRuflo").expanduser()
 RUFLO_TEAM_STATE = RUFLO_ROOT / "TeamState" / "teams.json"
 CODEX_SESSIONS = Path("~/.codex/sessions").expanduser()
+CLAUDE_SESSIONS = Path("~/.claude/projects").expanduser()
 ANTIGRAVITY_APP = Path("~/.gemini/antigravity").expanduser()
 ANTIGRAVITY_IDE = Path("~/.gemini/antigravity-ide").expanduser()
 ANTIGRAVITY_CLI = Path("~/.gemini/antigravity-cli").expanduser()
@@ -48,16 +49,20 @@ CURRENT_ECOSYSTEM_PROFILES = {
     "librarian_antigravity_cluster_semantic",
     "librarian_antigravity_cluster_semantic_reviewer",
     "librarian_antigravity_memory",
+    "librarian_claude_cluster_semantic",
+    "librarian_claude_cluster_semantic_reviewer",
     "librarian_codex_cluster_semantic",
     "librarian_codex_cluster_semantic_reviewer",
     "ruflo_antigravity_readonly_worker",
+    "ruflo_claude_readonly_worker",
     "ruflo_codex_readonly_worker",
 }
+KNOWN_PROVIDERS = ("antigravity", "codex", "claude")
 RUFLO_ROLE_RESPONSIBILITIES = {
-    "coordinator": "Scompone l'obiettivo e coordina le fasi usando il provider della sessione VS Code; l'altro provider può subentrare con un handoff registrato.",
-    "investigator": "Esamina una copia redatta dei file e passa automaticamente all'altro provider se il primo non è disponibile.",
-    "executor": "È l'unico writer e usa lo stesso provider della sessione VS Code; cambia proprietario soltanto tramite handoff.",
-    "reviewer": "Preferisce il provider opposto al writer e, se non disponibile, usa il writer marcando la revisione come fallback degradato.",
+    "coordinator": "Scompone l'obiettivo e coordina le fasi usando il provider della sessione da terminale; un altro provider può subentrare con un handoff registrato.",
+    "investigator": "Esamina una copia redatta dei file. Antigravity è il preferito quando non coordina; se non è disponibile passa al candidato successivo.",
+    "executor": "È l'unico writer e usa lo stesso provider della sessione da terminale; cambia proprietario soltanto tramite handoff.",
+    "reviewer": "È il ragionatore che non ha scritto il codice: Codex per una sessione Claude, Claude per una sessione Codex o Antigravity. Se nessun provider indipendente è disponibile usa il writer e marca la revisione come fallback degradato.",
 }
 QUOTA_ERROR_MARKERS = (
     "quota", "usage limit", "rate limit", "insufficient_quota",
@@ -248,6 +253,7 @@ def recent_runs(limit=12):
             "status": value.get("status", "UNKNOWN"),
             "cluster": value.get("cluster_title") or value.get("cluster_id") or path.parent.name,
             "provider": value.get("last_provider"),
+            "review_mode": value.get("review_mode"),
             "sources": len(value.get("source_notes") or []),
         })
     return rows
@@ -266,7 +272,7 @@ def librarian_provider_calls(limit=60):
         subject = value.get("cluster_title") or value.get("cluster_id") or path.parent.name
         for attempt in value.get("provider_attempts") or []:
             provider = attempt.get("provider")
-            if provider not in {"antigravity", "codex"}:
+            if provider not in KNOWN_PROVIDERS:
                 continue
             calls.append({
                 "provider": provider,
@@ -312,6 +318,7 @@ def general_provider_activity():
     """Observe provider use from file metadata only; never inspect prompts or outputs."""
     definitions = (
         ("codex", CODEX_SESSIONS, ("*.jsonl",), "Sessione Codex aggiornata", "App / VS Code / CLI"),
+        ("claude", CLAUDE_SESSIONS, ("*.jsonl",), "Sessione Claude aggiornata", "Terminale / VS Code / CLI"),
         ("antigravity", ANTIGRAVITY_CLI, ("history.jsonl", "log/*.log"), "Sessione Antigravity aggiornata", "CLI"),
         ("antigravity", ANTIGRAVITY_APP, ("conversations/*.db", "log/*.log"), "Sessione Antigravity aggiornata", "App / estensione VS Code"),
         ("antigravity", ANTIGRAVITY_IDE, ("conversations/*.db", "log/*.log"), "Sessione Antigravity aggiornata", "IDE"),
@@ -487,7 +494,7 @@ def ruflo_team_snapshot():
         unavailable_providers = team.get("unavailable_providers") or {}
         if not isinstance(unavailable_providers, dict):
             unavailable_providers = {}
-        available_providers = [provider for provider in ("codex", "antigravity") if provider not in unavailable_providers]
+        available_providers = [provider for provider in KNOWN_PROVIDERS if provider not in unavailable_providers]
         provider_separation = bool(
             writer_provider and coordinator_provider == writer_provider
             and reviewer_provider and writer_provider != reviewer_provider
@@ -522,7 +529,7 @@ def ruflo_team_snapshot():
             if not assigned_provider and role == "reviewer":
                 assigned_provider = reviewer_provider if reviewer_provider in available_providers else next(iter(available_providers), None)
             if not assigned_provider and role == "investigator":
-                assigned_provider = "codex o antigravity" if len(available_providers) == 2 else next(iter(available_providers), None)
+                assigned_provider = " o ".join(available_providers) if len(available_providers) > 1 else next(iter(available_providers), None)
             task_rows.append({
                 "team_id": team.get("team_id", "unknown"),
                 "task_id": task.get("task_id", "unknown"),
@@ -543,7 +550,7 @@ def ruflo_team_snapshot():
             })
             for attempt in attempts:
                 provider = attempt.get("provider")
-                if provider not in {"antigravity", "codex"}:
+                if provider not in KNOWN_PROVIDERS:
                     continue
                 provider_calls.append({
                     "provider": provider,
@@ -579,9 +586,9 @@ def ruflo_team_snapshot():
             if not assigned_provider and role == "reviewer":
                 assigned_provider = reviewer_provider if reviewer_provider in available_providers else next(iter(available_providers), None)
             if not assigned_provider and role == "investigator":
-                assigned_provider = "codex o antigravity" if len(available_providers) == 2 else next(iter(available_providers), None)
+                assigned_provider = " o ".join(available_providers) if len(available_providers) > 1 else next(iter(available_providers), None)
             if role in {"coordinator", "executor"}:
-                provider_rule = "Provider della sessione VS Code; dopo handoff il provider esaurito resta escluso"
+                provider_rule = "Provider della sessione da terminale; dopo handoff il provider esaurito resta escluso"
             elif role == "reviewer":
                 provider_rule = "Preferisce un provider diverso dall'autore; non interroga provider esclusi dall'handoff"
             else:
@@ -720,6 +727,7 @@ def dashboard_status():
     provider_state = provider_observations({
         "antigravity": installed_providers.get("antigravity_cli", False),
         "codex": installed_providers.get("codex", False),
+        "claude": installed_providers.get("claude_code", False),
     }, ruflo_teams.get("provider_calls", []), general_activity)
     if circuit.get("state") in {"open", "half_open"}:
         overall = "paused"
@@ -742,8 +750,8 @@ def dashboard_status():
         "cao": {"health": health.get("status") == "ok", "launch_agent": cao_agent},
         "providers": {
             **provider_state,
-            "primary": "antigravity",
-            "fallback": "codex",
+            "rotation": list(KNOWN_PROVIDERS),
+            "rotation_head": circuit.get("rotation_head"),
             "calls": provider_calls[:24],
         },
         "circuit": circuit,

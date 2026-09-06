@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).parents[1]))
 from brain_cluster_materializer import materialize_semantics, validate_semantics
 from brain_cluster_executor import managed_links, update_source_status, verify_source_snapshot
 import brain_cluster_organizer as organizer
-from brain_cluster_organizer import anchor_for, begin_provider_cycle, bind_semantic_envelope, local_triage, parse_semantic_response, prompt_for, provider_circuit_status, provider_result_error, record_dual_provider_failure, record_provider_success, redact_for_provider, run_with_fallback, sensitive_name, source_has_knowledge_link, split_groups
+from brain_cluster_organizer import anchor_for, begin_provider_cycle, bind_semantic_envelope, local_triage, parse_semantic_response, prompt_for, provider_circuit_status, provider_result_error, record_provider_cycle_failure, record_provider_success, redact_for_provider, run_with_fallback, sensitive_name, source_has_knowledge_link, split_groups
 import ruflo_memory_adapter
 
 
@@ -228,16 +228,82 @@ class ClusterPipelineTests(unittest.TestCase):
         self.assertEqual([item["status"] for item in attempts], ["unavailable", "started"])
         success.assert_called_once_with("codex")
 
-    def test_both_provider_failures_are_recorded_once_per_cycle(self):
+    def test_every_provider_failure_is_recorded_once_per_cycle(self):
         state = {"state": "closed", "consecutive_dual_failures": 1}
         with patch.object(organizer, "begin_provider_cycle", return_value=(True, {})):
-            with patch.object(organizer, "record_dual_provider_failure", return_value=state) as record:
+            with patch.object(organizer, "record_provider_cycle_failure", return_value=state) as record:
                 with patch.object(organizer, "run_step", side_effect=RuntimeError("quota")) as run:
                     with self.assertRaises(organizer.ProvidersUnavailable) as raised:
                         run_with_fallback(Path("/tmp"), "prompt")
-        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_count, len(organizer.PROVIDER_CHAIN))
         record.assert_called_once()
-        self.assertEqual(len(raised.exception.attempts), 2)
+        self.assertEqual(len(raised.exception.attempts), len(organizer.PROVIDER_CHAIN))
+
+    def test_codex_trust_is_declared_for_the_step_and_withdrawn_after(self):
+        response = {"status": "completed", "last_message": "{}"}
+        with tempfile.TemporaryDirectory() as temp, self.circuit_paths(temp):
+            config = Path(temp) / "config.toml"
+            config.write_text('[mcp_servers.keep]\ncommand = "keep"\n', encoding="utf-8")
+            workspace = Path(temp) / "workspace"
+            workspace.mkdir()
+            seen = []
+
+            def observe(ws, prompt, profile, provider):
+                # Codex must already be trusted while its own step runs.
+                seen.append((provider, str(workspace.resolve()) in config.read_text()))
+                return response
+
+            with patch.object(organizer, "CODEX_CONFIG", config):
+                with patch.object(organizer, "run_step", side_effect=observe):
+                    run_with_fallback(workspace, "prompt")
+                    run_with_fallback(workspace, "prompt")
+            self.assertIn(("codex", True), seen)
+            self.assertTrue(all(not trusted for name, trusted in seen if name != "codex"))
+            # Nothing this step added may survive it.
+            self.assertEqual(config.read_text(), '[mcp_servers.keep]\ncommand = "keep"\n')
+
+    def test_semantic_head_rotates_between_the_three_providers(self):
+        response = {"status": "completed", "last_message": "{}"}
+        heads = []
+        with tempfile.TemporaryDirectory() as temp, self.circuit_paths(temp):
+            for _ in range(4):
+                with patch.object(organizer, "run_step", return_value=response):
+                    _, provider, _ = run_with_fallback(Path("/tmp"), "prompt")
+                heads.append(provider["name"])
+        # A fresh cycle moves the head on; a success must not reset the cursor.
+        self.assertEqual(heads, ["antigravity", "codex", "claude", "antigravity"])
+
+    def test_review_prefers_a_provider_that_did_not_write_the_semantics(self):
+        response = {"status": "completed", "last_message": "{}"}
+        with tempfile.TemporaryDirectory() as temp, self.circuit_paths(temp):
+            with patch.object(organizer, "run_step", return_value=response) as run:
+                _, author, _ = run_with_fallback(Path("/tmp"), "prompt")
+                _, reviewer, _ = run_with_fallback(Path("/tmp"), "prompt", reviewing=True, author=author["name"])
+        self.assertNotEqual(reviewer["name"], author["name"])
+        self.assertEqual(run.call_args.args[2], reviewer["review_profile"])
+
+    def test_review_falls_back_to_the_author_only_as_a_last_resort(self):
+        response = {"status": "completed", "last_message": "{}"}
+        with tempfile.TemporaryDirectory() as temp, self.circuit_paths(temp):
+            with patch.object(organizer, "run_step", side_effect=[RuntimeError("quota"), RuntimeError("quota"), response]):
+                _, reviewer, attempts = run_with_fallback(
+                    Path("/tmp"), "prompt", reviewing=True, author="antigravity"
+                )
+        self.assertEqual(reviewer["name"], "antigravity")
+        self.assertEqual([item["provider"] for item in attempts][-1], "antigravity")
+
+    def test_rotation_cursor_survives_success_and_manual_reset(self):
+        with tempfile.TemporaryDirectory() as temp, self.circuit_paths(temp):
+            organizer.begin_provider_cycle()
+            organizer.begin_provider_cycle()
+            self.assertEqual(organizer.read_provider_circuit()["rotation_head"], "codex")
+            organizer.record_provider_success("codex")
+            self.assertEqual(organizer.read_provider_circuit()["rotation_head"], "codex")
+            organizer.reset_provider_circuit()
+            self.assertEqual(organizer.read_provider_circuit()["rotation_head"], "codex")
+            # A review cycle must not consume a turn of the rotation.
+            organizer.begin_provider_cycle(advance=False)
+            self.assertEqual(organizer.read_provider_circuit()["rotation_head"], "codex")
 
     def test_dual_failure_opens_circuit_on_tenth_cycle(self):
         failure = [
@@ -247,9 +313,9 @@ class ClusterPipelineTests(unittest.TestCase):
         base = dt.datetime(2026, 9, 3, 12, 0, tzinfo=dt.timezone.utc)
         with tempfile.TemporaryDirectory() as temp, self.circuit_paths(temp):
             for index in range(9):
-                state = record_dual_provider_failure(failure, base + dt.timedelta(minutes=index))
+                state = record_provider_cycle_failure(failure, base + dt.timedelta(minutes=index))
                 self.assertEqual(state["state"], "closed")
-            state = record_dual_provider_failure(failure, base + dt.timedelta(minutes=9))
+            state = record_provider_cycle_failure(failure, base + dt.timedelta(minutes=9))
             self.assertEqual(state["consecutive_dual_failures"], 10)
             self.assertEqual(state["state"], "open")
             self.assertIsNotNone(state["next_probe_at"])
@@ -259,7 +325,7 @@ class ClusterPipelineTests(unittest.TestCase):
         base = dt.datetime(2026, 9, 3, 12, 0, tzinfo=dt.timezone.utc)
         with tempfile.TemporaryDirectory() as temp, self.circuit_paths(temp):
             for _ in range(10):
-                record_dual_provider_failure(failure, base)
+                record_provider_cycle_failure(failure, base)
             allowed, _ = begin_provider_cycle(base + dt.timedelta(minutes=59))
             self.assertFalse(allowed)
             allowed, state = begin_provider_cycle(base + dt.timedelta(hours=1, seconds=1))
@@ -273,7 +339,7 @@ class ClusterPipelineTests(unittest.TestCase):
         failure = [{"provider": "both", "status": "unavailable", "error": "quota"}]
         with tempfile.TemporaryDirectory() as temp, self.circuit_paths(temp):
             for _ in range(10):
-                record_dual_provider_failure(failure, base)
+                record_provider_cycle_failure(failure, base)
             state = record_provider_success("codex", base + dt.timedelta(hours=1))
             self.assertEqual(state["state"], "closed")
             self.assertEqual(state["consecutive_dual_failures"], 0)
@@ -292,7 +358,7 @@ class ClusterPipelineTests(unittest.TestCase):
         response = {"status": "completed", "last_message": "not json"}
         with patch.object(organizer, "begin_provider_cycle", return_value=(True, {})):
             with patch.object(organizer, "record_provider_success") as success:
-                with patch.object(organizer, "record_dual_provider_failure") as failure:
+                with patch.object(organizer, "record_provider_cycle_failure") as failure:
                     with patch.object(organizer, "run_step", return_value=response):
                         result, _, _ = run_with_fallback(Path("/tmp"), "prompt")
         with self.assertRaises(ValueError):

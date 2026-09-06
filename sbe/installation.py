@@ -93,6 +93,9 @@ class Transaction:
             managed_path(home, raw)
         self.files = dict(self.old["files"])
         self.previous_jobs = self.old.get("previous_jobs", [])
+        self.claude_mcp = dict(self.old.get("claude_mcp", {}))
+        self.claude_bin = self.old.get("claude_bin")
+        self.claude_trust = dict(self.old.get("claude_trust", {}))
         self.before = {}
         self.backup = self.base / "Backups" / (time.strftime("%Y%m%d-%H%M%S")+"-"+uuid.uuid4().hex[:8])
         self.backup.mkdir(parents=True, mode=0o700)
@@ -126,7 +129,7 @@ class Transaction:
             restore(Path(path), value)
 
     def commit(self):
-        restore(self.ledger, {"data": base64.b64encode(json.dumps({"files": self.files, "previous_jobs": self.previous_jobs}, indent=2).encode()).decode(), "mode": 0o600})
+        restore(self.ledger, {"data": base64.b64encode(json.dumps({"files": self.files, "previous_jobs": self.previous_jobs, "claude_mcp": self.claude_mcp, "claude_bin": self.claude_bin, "claude_trust": self.claude_trust}, indent=2).encode()).decode(), "mode": 0o600})
         self.committed = True
 
     def __enter__(self):
@@ -188,9 +191,123 @@ def wrapper(python, module, env):
     return ("\n".join(lines)+"\n").encode()
 
 
+def claude_mcp_command(home, name):
+    """Read one user-scope Claude MCP registration without rewriting the file."""
+    path = home/".claude.json"
+    try:
+        if path.is_symlink():
+            raise ValueError("Symlinked Claude configuration is not supported")
+        data = json.loads(path.read_text()) if path.exists() else {}
+    except (OSError, ValueError):
+        raise ValueError("Claude configuration is unreadable") from None
+    server = (data.get("mcpServers") or {}).get(name) if isinstance(data, dict) else None
+    if server is None:
+        return None
+    if not isinstance(server, dict) or server.get("url") or server.get("type") not in (None, "stdio"):
+        raise ValueError("Existing MCP uses a different transport")
+    return server.get("command")
+
+
+def write_claude_config(config, data):
+    """Replace ~/.claude.json atomically, preserving its private mode."""
+    mode = os.stat(config).st_mode & 0o777 if config.exists() else 0o600
+    fd, raw = tempfile.mkstemp(dir=str(config.parent), prefix=".claude.json.sbe.")
+    temp = Path(raw)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            json.dump(data, handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temp, mode)
+        os.replace(temp, config)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def grant_claude_workspace_trust(home, roots):
+    """Pre-accept Claude Code's workspace trust dialog for the CAO snapshot roots.
+
+    CAO confirms that dialog with a bare Enter while "No, exit" is still the
+    selected option, so a worker launched in a directory Claude has never seen
+    exits at once and the run only fails later on the initialization timeout.
+    Trust is recorded per directory and inherited by subdirectories, so trusting
+    the two roots that hold generated snapshots covers every future task with no
+    per-task write. It grants no tool permission: that stays with the profile's
+    permissionMode and its disallowed tools. Returns each root's previous value
+    so uninstall can put it back.
+    """
+    config = home/".claude.json"
+    if config.is_symlink():
+        raise ValueError("Symlinked Claude configuration is not supported")
+    try:
+        data = json.loads(config.read_text()) if config.exists() else {}
+    except (OSError, ValueError):
+        raise ValueError("Claude configuration is unreadable") from None
+    if not isinstance(data, dict) or not isinstance(data.setdefault("projects", {}), dict):
+        raise ValueError("Claude projects must be a JSON object")
+    previous = {}
+    for root in roots:
+        key = str(Path(root).resolve())
+        entry = data["projects"].setdefault(key, {})
+        if not isinstance(entry, dict):
+            raise ValueError("Claude project entry must be a JSON object")
+        previous[key] = entry.get("hasTrustDialogAccepted")
+        entry["hasTrustDialogAccepted"] = True
+    if all(value is True for value in previous.values()):
+        return {}
+    write_claude_config(config, data)
+    return previous
+
+
+def restore_claude_trust(home, previous):
+    """Put each root back to the trust value it had before installation."""
+    if not previous:
+        return
+    config = home/".claude.json"
+    try:
+        data = json.loads(config.read_text()) if config.exists() else {}
+        projects = data.get("projects") if isinstance(data, dict) else None
+        if not isinstance(projects, dict):
+            return
+    except (OSError, ValueError):
+        return
+    for key, value in previous.items():
+        entry = projects.get(key)
+        if not isinstance(entry, dict):
+            continue
+        if value is None:
+            entry.pop("hasTrustDialogAccepted", None)
+            if not entry:
+                projects.pop(key, None)
+        else:
+            entry["hasTrustDialogAccepted"] = value
+    # A configuration that had no project map before must not keep an empty one.
+    if not projects:
+        data.pop("projects", None)
+    write_claude_config(config, data)
+
+
+def write_policy_block(tx, instructions, policy):
+    if instructions.is_symlink():
+        raise ValueError("Symlinked global instructions")
+    old = instructions.read_text() if instructions.exists() else ""
+    begin, end = "<!-- BEGIN SECONDBRAIN CONSULT POLICY -->", "<!-- END SECONDBRAIN CONSULT POLICY -->"
+    if begin in old:
+        start = old.index(begin)
+        finish = old.find(end, start)
+        if finish < 0:
+            raise ValueError("Incomplete managed policy")
+        updated = old[:start]+policy+old[finish+len(end):]
+    else:
+        updated = old.rstrip()+"\n\n"+policy+"\n"
+    tx.write(instructions, updated.encode(), merge=True)
+
+
 def configure_clients(tx, providers, commands, bundle, executables):
     import tomlkit
     home = tx.home
+    claude_undo = []
+    claude_trust_undo = {}
     if "codex" in providers:
         cfg = home / ".codex/config.toml"
         if cfg.is_symlink():
@@ -240,22 +357,47 @@ def configure_clients(tx, providers, commands, bundle, executables):
         tx.write(registry, (json.dumps(reg,indent=2)+"\n").encode(), merge=True)
         for name in ("ruflo-team", "secondbrain-consult"):
             tx.write(skill_root/name/"SKILL.md", (bundle/"AgentAccess/Skills"/name/"SKILL.md").read_bytes())
-        policy = (bundle/"AgentAccess/antigravity-secondbrain-policy.md").read_text().strip()
-        instructions = home/".gemini/GEMINI.md"
-        if instructions.is_symlink():
-            raise ValueError("Symlinked global instructions")
-        old = instructions.read_text() if instructions.exists() else ""
-        begin, end = "<!-- BEGIN SECONDBRAIN CONSULT POLICY -->", "<!-- END SECONDBRAIN CONSULT POLICY -->"
-        if begin in old:
-            start = old.index(begin)
-            finish = old.find(end, start)
-            if finish < 0:
-                raise ValueError("Incomplete managed policy")
-            updated = old[:start]+policy+old[finish+len(end):]
-        else:
-            updated = old.rstrip()+"\n\n"+policy+"\n"
-        tx.write(instructions, updated.encode(), merge=True)
+        write_policy_block(tx, home/".gemini/GEMINI.md", (bundle/"AgentAccess/antigravity-secondbrain-policy.md").read_text().strip())
         tx.write(home/".local/bin/antigravity", link=executables["agy"], protected=True)
+    if "claude" in providers:
+        for name in ("ruflo-team", "secondbrain-consult"):
+            tx.write(home/".claude/skills"/name/"SKILL.md", (bundle/"AgentAccess/Skills"/name/"SKILL.md").read_bytes())
+        write_policy_block(tx, home/".claude/CLAUDE.md", (bundle/"AgentAccess/antigravity-secondbrain-policy.md").read_text().strip())
+        # ~/.claude.json also carries the user's project history and is rewritten by
+        # any running session, so registration is left to the Claude CLI. The
+        # previous command is recorded in the ledger for uninstall.
+        env = os.environ | {"HOME": str(home)}
+        tx.claude_bin = str(executables["claude"])
+        for name, command in commands.items():
+            previous = claude_mcp_command(home, name)
+            if previous == str(command):
+                continue
+            if previous is not None:
+                safe_run([executables["claude"], "mcp", "remove", "-s", "user", name], env=env)
+            safe_run([executables["claude"], "mcp", "add", "-s", "user", name, "--", str(command)], env=env)
+            tx.claude_mcp.setdefault(name, previous)
+            claude_undo.append((name, previous))
+        support = home/"Library/Application Support"
+        claude_trust_undo = grant_claude_workspace_trust(home, [
+            support/"SecondBrainRuflo/TeamRuns", support/"SecondBrainLibrarian/ClusterRuns",
+        ])
+        for key, value in claude_trust_undo.items():
+            tx.claude_trust.setdefault(key, value)
+    # The trust map is split like the MCP one: the returned dict is what THIS run
+    # granted and a rollback must undo, while the ledger keeps the value from
+    # before the first install for uninstall to restore.
+    return claude_undo, claude_trust_undo
+
+
+def restore_claude_mcp(claude, entries, home):
+    """Undo user-scope Claude MCP registrations recorded for this home."""
+    env = os.environ | {"HOME": str(home)}
+    for name, previous in reversed(list(entries)):
+        if not claude:
+            return
+        subprocess.run([claude,"mcp","remove","-s","user",name],capture_output=True,env=env)
+        if previous:
+            subprocess.run([claude,"mcp","add","-s","user",name,"--",previous],capture_output=True,env=env)
 
 
 def make_plists(home, vault, python, targets, executables, env):
@@ -297,6 +439,8 @@ def deploy(home, vault, python, providers, executables, bundle=BUNDLE, services=
     domain = f"gui/{os.getuid()}"
     started = []
     previous_jobs = []
+    claude_undo = []
+    claude_trust_undo = {}
     with install_lock(home):
         with Transaction(home, adopt=adopt) as tx:
             try:
@@ -335,6 +479,7 @@ def deploy(home, vault, python, providers, executables, bundle=BUNDLE, services=
                     targets["semantic"]/"brain-search":targets["semantic"]/"brain_search.py",
                     targets["semantic"]/"secondbrain-mcp":targets["semantic"]/"secondbrain_mcp.py",
                     targets["ruflo"]/"team-runtime/ruflo-team-mcp":targets["ruflo"]/"team-runtime/ruflo_team_mcp.py",
+                    targets["ruflo"]/"team-runtime/worker-report-mcp":targets["ruflo"]/"team-runtime/worker_report_mcp.py",
                     targets["librarian"]/"brain-cluster-organize":targets["librarian"]/"brain_cluster_organizer.py",
                     targets["librarian"]/"brain-cluster-execute":targets["librarian"]/"brain_cluster_executor.py",
                     targets["librarian"]/"librarian-service":targets["librarian"]/"secondbrain_librarian_service.py",
@@ -344,7 +489,7 @@ def deploy(home, vault, python, providers, executables, bundle=BUNDLE, services=
                 for path,module in wrappers.items():
                     tx.write(path,wrapper(python,module,env),mode=0o700)
                 commands = {"secondbrain":targets["semantic"]/"secondbrain-mcp","ruflo-team":targets["ruflo"]/"team-runtime/ruflo-team-mcp"}
-                configure_clients(tx,providers,commands,bundle,executables)
+                claude_undo,claude_trust_undo=configure_clients(tx,providers,commands,bundle,executables)
                 for source in (bundle/"Ruflo/CAOProfiles",bundle/"Librarian/CAOProfiles"):
                     for profile in source.glob("*.md"):
                         if profile.name=="README.md" or not any(p in profile.name for p in providers):
@@ -353,6 +498,7 @@ def deploy(home, vault, python, providers, executables, bundle=BUNDLE, services=
                         content=content.replace('"{{RUFLO_BIN}}"',json.dumps(env["SECOND_BRAIN_RUFLO_BIN"]))
                         content=content.replace('"{{RUFLO_DB}}"',json.dumps(str(targets["ruflo"]/"data/memory.db")))
                         content=content.replace('"{{RUFLO_MEMORY_ROOT}}"',json.dumps(str(targets["ruflo"]/"data")))
+                        content=content.replace('"{{WORKER_REPORT_MCP}}"',json.dumps(str(targets["ruflo"]/"team-runtime/worker-report-mcp")))
                         for folder in ("agent-store","agent-context"):
                             tx.write(home/".aws/cli-agent-orchestrator"/folder/profile.name,content.encode())
                 # CAO reads skill packages from its registered global skill area.
@@ -377,6 +523,8 @@ def deploy(home, vault, python, providers, executables, bundle=BUNDLE, services=
             except BaseException:
                 for label in reversed(started):
                     subprocess.run(["launchctl","bootout",domain+"/"+label],capture_output=True)
+                restore_claude_mcp(executables.get("claude"), claude_undo, home)
+                restore_claude_trust(home, claude_trust_undo)
                 tx.rollback()
                 tx.committed=True  # Rollback already performed before old services restart.
                 for p in previous_jobs:
@@ -425,6 +573,8 @@ def uninstall(home, services=True, fail_after=None):
                         raise InstallationError("Invalid original service record")
                     safe_run(["launchctl","bootstrap",domain,str(p)])
                     restarted.append(p.stem)
+            restore_claude_mcp(data.get("claude_bin") or shutil.which("claude"), list(data.get("claude_mcp", {}).items()), home)
+            restore_claude_trust(home, data.get("claude_trust", {}))
             ledger.unlink()
         except BaseException:
             for label in reversed(restarted):

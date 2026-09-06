@@ -7,6 +7,23 @@ from types import SimpleNamespace
 
 from sbe.installation import BUNDLE, Transaction, check_started_services, deploy, image, root, uninstall
 
+# Emulates `claude mcp add/remove -s user`, which owns ~/.claude.json.
+CLAUDE_STUB = """#!/usr/bin/env python3
+import json, sys
+from pathlib import Path
+config = Path({config!r})
+data = json.loads(config.read_text()) if config.exists() else {{}}
+servers = data.setdefault("mcpServers", {{}})
+argv = sys.argv[1:]
+if argv[:4] == ["mcp", "add", "-s", "user"]:
+    servers[argv[4]] = {{"type": "stdio", "command": argv[-1]}}
+elif argv[:4] == ["mcp", "remove", "-s", "user"]:
+    servers.pop(argv[4], None)
+else:
+    raise SystemExit(1)
+config.write_text(json.dumps(data, indent=2))
+"""
+
 
 class InstallationTests(unittest.TestCase):
     def fixture(self, directory):
@@ -16,6 +33,8 @@ class InstallationTests(unittest.TestCase):
         exe={}
         for name in ("codex","agy","cao","cao-server","tmux","node"):
             p=bins/name; p.write_text("#!/bin/sh\nexit 0\n"); p.chmod(0o700); exe[name]=str(p)
+        claude=bins/"claude"; claude.write_text(CLAUDE_STUB.format(config=str(home/".claude.json")))
+        claude.chmod(0o700); exe["claude"]=str(claude)
         python=home/"release/venv/bin/python"; python.parent.mkdir(parents=True); python.write_text("fixture")
         cfg=home/".codex/config.toml"; cfg.parent.mkdir()
         cfg.write_text('# Keep this comment\n[mcp_servers.existing]\ncommand="keep"\n')
@@ -47,6 +66,38 @@ class InstallationTests(unittest.TestCase):
             self.assertEqual(len(list((home/".aws/cli-agent-orchestrator/agent-store").glob("*.md"))),7)
             for _ in range(2):
                 uninstall(home,services=False)
+            self.assertEqual(initial,self.snapshot(home))
+
+    def test_claude_client_is_configured_idempotently_and_reversibly(self):
+        with tempfile.TemporaryDirectory() as d:
+            home,vault,python,exe=self.fixture(d)
+            # Same formatting the stub writes back, so the snapshot compares content only.
+            (home/".claude.json").write_text(json.dumps({"mcpServers":{"existing":{"type":"stdio","command":"keep"}}},indent=2))
+            initial=self.snapshot(home)
+            for _ in range(2):
+                deploy(home,vault,python,["claude"],exe,services=False)
+            installed=self.snapshot(home)
+            servers=json.loads((home/".claude.json").read_text())["mcpServers"]
+            self.assertEqual(servers["existing"],{"type":"stdio","command":"keep"})
+            self.assertEqual(servers["ruflo-team"]["command"],
+                             str(home/"Library/Application Support/SecondBrainRuflo/team-runtime/ruflo-team-mcp"))
+            self.assertIn("secondbrain",servers)
+            self.assertIn("BEGIN SECONDBRAIN CONSULT POLICY",(home/".claude/CLAUDE.md").read_text())
+            # CAO cannot answer Claude's workspace trust dialog, so the snapshot
+            # roots are trusted once and their subdirectories inherit it.
+            projects=json.loads((home/".claude.json").read_text())["projects"]
+            support=home/"Library/Application Support"
+            for root in (support/"SecondBrainRuflo/TeamRuns", support/"SecondBrainLibrarian/ClusterRuns"):
+                self.assertTrue(projects[str(root)]["hasTrustDialogAccepted"])
+            self.assertTrue((home/".claude/skills/ruflo-team/SKILL.md").is_file())
+            # Only the Claude profiles are installed for a Claude-only deployment.
+            profiles={p.name for p in (home/".aws/cli-agent-orchestrator/agent-store").glob("*.md")}
+            self.assertEqual(profiles,{"ruflo_claude_readonly_worker.md","librarian_claude_cluster_semantic.md",
+                                       "librarian_claude_cluster_semantic_reviewer.md"})
+            with self.assertRaises(RuntimeError):
+                deploy(home,vault,python,["claude"],exe,services=False,fail_after=True)
+            self.assertEqual(installed,self.snapshot(home))
+            uninstall(home,services=False)
             self.assertEqual(initial,self.snapshot(home))
 
     def test_failed_first_install_restores_initial_config(self):

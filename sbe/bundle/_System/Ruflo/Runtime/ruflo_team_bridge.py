@@ -70,6 +70,26 @@ PROVIDERS = {
         "provider": "codex",
         "profile": "ruflo_codex_readonly_worker",
     },
+    "claude": {
+        "provider": "claude_code",
+        "profile": "ruflo_claude_readonly_worker",
+    },
+}
+# Role assignment per session provider. The session provider coordinates and is
+# the sole writer; the other two split investigation and review. Antigravity is
+# the preferred investigator whenever it does not coordinate, so review always
+# lands on the reasoning provider that did not write the code. The lists are
+# preferences, not constraints: an unavailable head falls through to the next
+# candidate.
+REVIEWER_PREFERENCE = {
+    "claude": ("codex", "antigravity"),
+    "codex": ("claude", "antigravity"),
+    "antigravity": ("claude", "codex"),
+}
+INVESTIGATOR_PREFERENCE = {
+    "claude": ("antigravity", "codex", "claude"),
+    "codex": ("antigravity", "claude", "codex"),
+    "antigravity": ("codex", "claude", "antigravity"),
 }
 DENIED_PARTS = {
     ".git", ".venv", "venv", "node_modules", "__pycache__", ".cache",
@@ -97,7 +117,15 @@ FAILURE_PATTERNS = (
     r"\bforbidden\b",
     r"\binvalid api key\b",
 )
-WORKER_VERDICT_PATTERN = re.compile(r"(?im)^\s*VERDICT:\s*(PASS|BLOCKED)\s*$")
+# CAO captures the terminal pane, so the marker cannot be required to be its own
+# line nor the end of the message: re-wrapping glues it to the preceding sentence
+# ("...edge case.VERDICT:PASS") and teardown appends its own epilogue after it.
+# What still separates a real answer from a captured echo of our own prompt is
+# that the instruction always names both verdicts as one "PASS or VERDICT:
+# BLOCKED" pair, so those two are ignored and only a standalone marker counts.
+WORKER_VERDICT_PATTERN = re.compile(r"(?i)VERDICT:\s*(PASS|BLOCKED)")
+ECHOED_VERDICT_TAIL = re.compile(r"(?i)\s*or\s*VERDICT:\s*(?:PASS|BLOCKED)")
+ECHOED_VERDICT_HEAD = re.compile(r"(?i)VERDICT:\s*(?:PASS|BLOCKED)\s*or\s*\Z")
 
 
 class BridgeError(RuntimeError):
@@ -338,17 +366,134 @@ def _provider_error(result: dict) -> str | None:
     lowered = message.casefold()
     if not message.strip():
         return "Provider returned no response"
-    if WORKER_VERDICT_PATTERN.search(message):
+    if _worker_verdict_match(message):
         return None
     if any(re.search(pattern, lowered) for pattern in FAILURE_PATTERNS):
         return f"Provider technical failure: {message[-1000:]}"
     return None
 
 
+def _worker_verdict_match(message: str):
+    """Last verdict marker that is not one half of the echoed instruction pair."""
+    found = None
+    for match in WORKER_VERDICT_PATTERN.finditer(message):
+        if ECHOED_VERDICT_TAIL.match(message, match.end()):
+            continue
+        if ECHOED_VERDICT_HEAD.search(message[max(0, match.start() - 40):match.start()]):
+            continue
+        found = match
+    return found
+
+
+INCOMPLETE_CAPTURE = "CAO worker response is missing VERDICT"
+CAPTURE_RETRIES = 1
+# Providers that deliver their report through the out-of-band channel instead of
+# the terminal pane. The tool is pre-authorized per run in the staged snapshot,
+# so no global client permission is granted.
+REPORT_CHANNEL_PROVIDERS = {"claude"}
+REPORT_TOOL = "mcp__secondbrain-worker-report__report_worker_result"
+REPORT_NAME = "worker-report.json"
+
+
+def _prepare_report_channel(workspace: Path) -> Path:
+    """Pre-authorize the delivery tool for this run only, and clear a stale report.
+
+    Claude Code reads project-scoped settings from its working directory, which
+    is the snapshot the bridge just staged, so the allowance lives and dies with
+    the run instead of touching the user's global configuration.
+    """
+    report = workspace.parent / REPORT_NAME
+    report.unlink(missing_ok=True)
+    settings = workspace / ".claude" / "settings.local.json"
+    settings.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _atomic_json(settings, {"permissions": {"allow": [REPORT_TOOL]}})
+    return report
+
+
+CODEX_TRUST_PROVIDERS = {"codex"}
+CODEX_CONFIG = Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser() / "config.toml"
+
+
+def _codex_trust_block(workspace: Path) -> str:
+    return f'\n[projects.{json.dumps(str(workspace.resolve()))}]\ntrust_level = "trusted"\n'
+
+
+def _declare_codex_trust(workspace: Path) -> str | None:
+    """Pre-declare the snapshot as trusted so Codex never has to persist trust.
+
+    Codex asks about a directory it has not seen and then writes the answer back
+    into its own configuration. That write fails whenever any unrelated entry in
+    the file does not pass its stricter write-time validation, which leaves the
+    worker parked on a prompt until the CAO step times out ten minutes later.
+    Trust is not inherited from parent directories, so the exact snapshot is
+    declared here and withdrawn again once the run ends. The block is appended
+    and later removed verbatim rather than through a parser, so every other byte
+    of a file the user also edits by hand stays exactly as it was.
+    """
+    block = _codex_trust_block(workspace)
+    try:
+        current = CODEX_CONFIG.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    if block in current:
+        return None
+    try:
+        CODEX_CONFIG.write_text(current + block, encoding="utf-8")
+    except OSError:
+        return None
+    return block
+
+
+def _withdraw_codex_trust(block: str | None) -> None:
+    """Remove exactly the declaration this run added; never touch anything else."""
+    if not block:
+        return
+    try:
+        current = CODEX_CONFIG.read_text(encoding="utf-8")
+        if block in current:
+            CODEX_CONFIG.write_text(current.replace(block, "", 1), encoding="utf-8")
+    except OSError:
+        return
+
+
+def _forget_workspace_project(workspace: Path) -> None:
+    """Drop the client's own project record for a snapshot that no longer matters.
+
+    Claude Code registers every directory it is launched in, so one entry per
+    task would accumulate forever in a file this bridge otherwise never touches.
+    Only paths inside the bridge's own runs directory are removed, and a failure
+    here is never allowed to fail the task.
+    """
+    config = Path("~/.claude.json").expanduser()
+    try:
+        key = str(workspace.resolve())
+        if not workspace.resolve().is_relative_to(RUNS_DIR.resolve()):
+            return
+        data = json.loads(config.read_text(encoding="utf-8"))
+        projects = data.get("projects")
+        if not isinstance(projects, dict) or projects.pop(key, None) is None:
+            return
+        _atomic_json(config, data)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return
+
+
+def _read_worker_report(report: Path) -> dict | None:
+    """Return a delivered report, or None when the worker never called the tool."""
+    try:
+        value = json.loads(report.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    verdict = str(value.get("verdict", "")).upper() if isinstance(value, dict) else ""
+    if verdict not in {"PASS", "BLOCKED"}:
+        return None
+    return {"verdict": verdict, "report": str(value.get("report", ""))[:MAX_OUTPUT_CHARS],
+            "truncated": bool(value.get("truncated"))}
+
+
 def _worker_verdict(result: dict) -> str:
     """Require a machine-checkable end marker so echoed prompts are not accepted."""
-    message = str(result.get("last_message", "") or "")
-    match = WORKER_VERDICT_PATTERN.search(message)
+    match = _worker_verdict_match(str(result.get("last_message", "") or ""))
     if not match:
         raise BridgeError("CAO worker response is missing VERDICT: PASS or VERDICT: BLOCKED")
     return match.group(1).upper()
@@ -367,26 +512,32 @@ def _circuit_ready(team: dict) -> None:
     circuit["state"] = "probe"
 
 
-def _provider_order(preference: str) -> list[str]:
-    preference = str(preference).casefold()
-    if preference not in PROVIDERS:
-        raise BridgeError("provider_preference must be antigravity or codex")
-    other = "codex" if preference == "antigravity" else "antigravity"
-    return [preference, other]
+def _known_provider(value: object, label: str) -> str:
+    normalized = str(value or "").casefold()
+    if normalized not in PROVIDERS:
+        raise BridgeError(f"{label} must be one of {', '.join(sorted(PROVIDERS))}")
+    return normalized
+
+
+def _reviewer_candidates(writer_provider: str) -> list[str]:
+    """Independent reviewers first; the writer closes the list as the degraded fallback."""
+    writer_provider = _known_provider(writer_provider, "writer_provider")
+    return [*REVIEWER_PREFERENCE[writer_provider], writer_provider]
+
+
+def _investigator_candidates(coordinator_provider: str, preference: object = None) -> list[str]:
+    """Investigation has no independence requirement, so the writer stays eligible last."""
+    coordinator_provider = _known_provider(coordinator_provider, "coordinator_provider")
+    ordered = [_known_provider(preference, "provider_preference")] if preference else []
+    for provider in INVESTIGATOR_PREFERENCE[coordinator_provider]:
+        if provider not in ordered:
+            ordered.append(provider)
+    return ordered
 
 
 def _writer_and_reviewer(writer_provider: str) -> tuple[str, str]:
-    writer_provider = str(writer_provider).casefold()
-    if writer_provider not in PROVIDERS:
-        raise BridgeError("writer_provider must be antigravity or codex")
-    reviewer_provider = "codex" if writer_provider == "antigravity" else "antigravity"
-    return writer_provider, reviewer_provider
-
-
-def _other_provider(provider: str) -> str:
-    if provider not in PROVIDERS:
-        raise BridgeError("provider must be antigravity or codex")
-    return "codex" if provider == "antigravity" else "antigravity"
+    writer_provider = _known_provider(writer_provider, "writer_provider")
+    return writer_provider, REVIEWER_PREFERENCE[writer_provider][0]
 
 
 def _eligible_provider_order(team: dict, candidates: list[str]) -> list[str]:
@@ -426,10 +577,7 @@ def _team_provider_separation(team: dict) -> tuple[str, str]:
     if writer_provider == reviewer_provider:
         raise BridgeError("Writer and reviewer providers must be different")
     if coordinator_provider != writer_provider:
-        raise BridgeError("Coordinator and writer must use the VS Code session provider")
-    expected = "codex" if writer_provider == "antigravity" else "antigravity"
-    if reviewer_provider != expected:
-        raise BridgeError("Team reviewer provider does not match the required independent provider")
+        raise BridgeError("Coordinator and writer must use the session provider")
     return writer_provider, reviewer_provider
 
 
@@ -499,7 +647,7 @@ def create_ruflo_team(objective: str, project_path: str, writer_provider: str) -
             "writer_provider": writer_provider,
             "reviewer_provider": reviewer_provider,
             "provider_separation": True,
-            "writer": "The calling VS Code agent is the only project writer; review prefers the other provider and labels same-provider fallback as degraded.",
+            "writer": "The calling session agent is the only project writer; review prefers an independent provider and labels same-provider fallback as degraded.",
         }
 
 
@@ -520,6 +668,7 @@ def create_ruflo_task(
         if team.get("status") != "active":
             raise BridgeError("Tasks can be created only in an active team")
         writer_provider, _ = _team_provider_separation(team)
+        coordinator_provider = team.get("coordinator_provider") or writer_provider
         task_type = "research" if role == "investigator" else "bugfix" if role == "reviewer" else "feature"
         result = _ruflo_exec("task_create", {
             "type": task_type,
@@ -544,15 +693,13 @@ def create_ruflo_task(
             ]
             completed_work.sort(key=lambda item: item.get("updated_at") or "", reverse=True)
             reviewed_writer = completed_work[0]["provider"] if completed_work else writer_provider
+            candidates = _reviewer_candidates(reviewed_writer)
             team["tasks"][task_id]["reviewed_writer_provider"] = reviewed_writer
-            preferred_reviewer = _other_provider(reviewed_writer)
-            team["tasks"][task_id]["preferred_provider"] = preferred_reviewer
-            team["tasks"][task_id]["provider"] = _eligible_provider_order(
-                team, [preferred_reviewer, reviewed_writer]
-            )[0]
+            team["tasks"][task_id]["preferred_provider"] = candidates[0]
+            team["tasks"][task_id]["provider"] = _eligible_provider_order(team, candidates)[0]
         else:
             team["tasks"][task_id]["eligible_providers"] = _eligible_provider_order(
-                team, ["codex", "antigravity"]
+                team, _investigator_candidates(coordinator_provider)
             )
         team["updated_at"] = _iso()
         return dict(team["tasks"][task_id])
@@ -581,15 +728,17 @@ def run_ruflo_readonly_task(
         writer_provider, _ = _team_provider_separation(team)
         reviewed_writer = task.get("reviewed_writer_provider") or writer_provider
         if task.get("role") == "reviewer":
+            candidates = _reviewer_candidates(reviewed_writer)
             preferred_reviewer = task.get("preferred_provider") or task.get("provider")
-            if preferred_reviewer not in PROVIDERS or preferred_reviewer == reviewed_writer:
-                preferred_reviewer = _other_provider(reviewed_writer)
-            provider_order = _eligible_provider_order(
-                team, [preferred_reviewer, _other_provider(preferred_reviewer)]
-            )
+            if preferred_reviewer in PROVIDERS and preferred_reviewer != reviewed_writer:
+                candidates = [preferred_reviewer, *(name for name in candidates if name != preferred_reviewer)]
+            provider_order = _eligible_provider_order(team, candidates)
         else:
             provider_order = _eligible_provider_order(
-                team, _provider_order(provider_preference or "antigravity")
+                team,
+                _investigator_candidates(
+                    team.get("coordinator_provider") or writer_provider, provider_preference
+                ),
             )
         _circuit_ready(team)
         project = _safe_project(team["project_path"])
@@ -625,20 +774,55 @@ def run_ruflo_readonly_task(
                 "End with exactly one line: VERDICT: PASS or VERDICT: BLOCKED."
             )
             try:
-                result = _cao_post({
-                    "provider": provider["provider"],
-                    "agent": provider["profile"],
-                    "prompt": prompt,
-                    "teardown": True,
-                    "timeout": 600.0,
-                    "working_directory": str(workspace),
-                    "allowed_tools": ["@builtin", "fs_read", "fs_list"],
-                    "use_worktree": False,
-                })
-                error = _provider_error(result)
-                if error:
-                    raise BridgeError(error)
-                worker_verdict = _worker_verdict(result)
+                # CAO reads a turn as finished from the shape of the terminal
+                # pane, so a still-streaming answer is sometimes captured and
+                # torn down mid-sentence. That loses the end marker and is a
+                # transient framing failure of the capture, not an unavailable
+                # provider: retry this same worker before degrading the role to
+                # the next candidate. Every other error still falls through at
+                # once, so quota and auth failures are never retried.
+                report = (
+                    _prepare_report_channel(workspace)
+                    if provider_name in REPORT_CHANNEL_PROVIDERS else None
+                )
+                codex_trust = (
+                    _declare_codex_trust(workspace)
+                    if provider_name in CODEX_TRUST_PROVIDERS else None
+                )
+                for capture_attempt in range(CAPTURE_RETRIES + 1):
+                    result = _cao_post({
+                        "provider": provider["provider"],
+                        "agent": provider["profile"],
+                        "prompt": prompt,
+                        "teardown": True,
+                        "timeout": 600.0,
+                        "working_directory": str(workspace),
+                        "allowed_tools": ["@builtin", "fs_read", "fs_list"],
+                        "use_worktree": False,
+                    })
+                    if report is not None:
+                        _forget_workspace_project(workspace)
+                    delivered = _read_worker_report(report) if report is not None else None
+                    if delivered:
+                        # The tool call already carried the whole answer, so the
+                        # pane no longer decides whether the run succeeded.
+                        result = dict(result, last_message=delivered["report"])
+                        worker_verdict = delivered["verdict"]
+                        attempt["delivery"] = "report_channel"
+                        break
+                    error = _provider_error(result)
+                    if error:
+                        raise BridgeError(error)
+                    try:
+                        worker_verdict = _worker_verdict(result)
+                        attempt["delivery"] = "terminal_capture"
+                        break
+                    except BridgeError as exc:
+                        if capture_attempt >= CAPTURE_RETRIES or INCOMPLETE_CAPTURE not in str(exc):
+                            raise
+                        attempt["capture_retries"] = capture_attempt + 1
+                        task["updated_at"] = _iso()
+                        _atomic_json(STATE_PATH, state)
             except Exception as exc:
                 attempt.update({
                     "status": "unavailable",
@@ -650,6 +834,8 @@ def run_ruflo_readonly_task(
                 team["updated_at"] = attempt["ended_at"]
                 _atomic_json(STATE_PATH, state)
                 continue
+            finally:
+                _withdraw_codex_trust(codex_trust)
             output = str(result.get("last_message", ""))[:MAX_OUTPUT_CHARS]
             attempt.update({"status": "completed", "ended_at": _iso()})
             attempts.append(dict(attempt))
@@ -700,7 +886,7 @@ def run_ruflo_readonly_task(
         team["updated_at"] = _iso()
         failure_subject = "All eligible reviewer providers" if task.get("role") == "reviewer" else "All eligible investigator providers"
         raise BridgeError(
-            f"{failure_subject} was unavailable; failure cycle {failures}/{FAILURE_THRESHOLD}. "
+            f"{failure_subject} were unavailable; failure cycle {failures}/{FAILURE_THRESHOLD}. "
             f"State: {circuit['state']}"
         )
 
@@ -780,9 +966,7 @@ def list_ruflo_teams(active_only: bool = True) -> dict[str, object]:
 
 def take_over_ruflo_team(team_id: str, new_provider: str, reason: str = "quota_exhausted") -> dict[str, object]:
     """Transfer VS Code ownership after the previous provider exhausts its quota."""
-    new_provider = str(new_provider).casefold()
-    if new_provider not in PROVIDERS:
-        raise BridgeError("new_provider must be antigravity or codex")
+    new_provider = _known_provider(new_provider, "new_provider")
     reason = _validate_quota_handoff_reason(reason)
     with _LockedState() as state:
         team = _team(state, team_id)
@@ -832,14 +1016,14 @@ def take_over_ruflo_team(team_id: str, new_provider: str, reason: str = "quota_e
                 task["provider"] = writer_provider
             elif role == "reviewer":
                 reviewed_writer = task.get("reviewed_writer_provider")
-                preferred_reviewer = _other_provider(reviewed_writer) if reviewed_writer in PROVIDERS else reviewer_provider
-                task["preferred_provider"] = preferred_reviewer
-                task["provider"] = _eligible_provider_order(
-                    team, [preferred_reviewer, _other_provider(preferred_reviewer)]
-                )[0]
+                candidates = _reviewer_candidates(
+                    reviewed_writer if reviewed_writer in PROVIDERS else writer_provider
+                )
+                task["preferred_provider"] = candidates[0]
+                task["provider"] = _eligible_provider_order(team, candidates)[0]
             elif role == "investigator":
                 task["eligible_providers"] = _eligible_provider_order(
-                    team, ["codex", "antigravity"]
+                    team, _investigator_candidates(writer_provider)
                 )
             task["updated_at"] = handoff["at"]
         return {
@@ -929,7 +1113,7 @@ def record_ruflo_verified_outcome(
             "writer_provider": work_provider,
             "current_team_writer_provider": current_writer_provider,
             "reviewer_provider": actual_reviewer,
-            "preferred_reviewer_provider": _other_provider(work_provider),
+            "preferred_reviewer_provider": _reviewer_candidates(work_provider)[0],
             "review_independent": review_independent,
             "verification_mode": verification_mode,
             "verified_at": _iso(),

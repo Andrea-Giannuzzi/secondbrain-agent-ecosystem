@@ -23,9 +23,9 @@ def main():
         parser.error("Install Python 3.12 or later first")
     required=("node","npm","cao","cao-server","tmux","pdftotext","pdfinfo","pdftoppm","tesseract")
     missing=[name for name in required if not shutil.which(name)]
-    providers=[name for name,cmd in (("codex","codex"),("antigravity","agy")) if shutil.which(cmd)]
+    providers=[name for name,cmd in (("codex","codex"),("antigravity","agy"),("claude","claude")) if shutil.which(cmd)]
     if missing or not providers:
-        parser.error("Missing prerequisites: "+", ".join(missing or ["Codex or agy"])+". See README installation instructions.")
+        parser.error("Missing prerequisites: "+", ".join(missing or ["Codex, agy or claude"])+". See README installation instructions.")
     node=subprocess.run(["node","--version"],capture_output=True,text=True,check=True).stdout.strip()
     if int(node.lstrip("v").split(".")[0])<20:
         parser.error("Node.js 20 or later required")

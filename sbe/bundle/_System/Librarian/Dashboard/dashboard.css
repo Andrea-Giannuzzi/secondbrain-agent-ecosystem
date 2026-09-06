@@ -10,6 +10,7 @@
   --cyan: #58c7ff;
   --violet: #9b8cff;
   --amber: #ffbf69;
+  --coral: #ff9a76;
   --red: #ff7082;
 }
 * { box-sizing: border-box; }
@@ -60,7 +61,7 @@ h2 { font-size: 21px; letter-spacing: -.02em; }
 .agent b, .service-line b { color: var(--green); font-size: 12px; }
 .agent b.provider-unavailable { color: var(--red); }
 .agent-icon { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 11px; font-weight: 900; background: #232a36; }
-.agent-icon.violet { color: var(--violet); }.agent-icon.cyan { color: var(--cyan); }.agent-icon.amber { color: var(--amber); }.agent-icon.green { color: var(--green); }
+.agent-icon.violet { color: var(--violet); }.agent-icon.cyan { color: var(--cyan); }.agent-icon.amber { color: var(--amber); }.agent-icon.green { color: var(--green); }.agent-icon.coral { color: var(--coral); }
 .provider-note, .reasons-copy { margin: 14px 0 0; color: var(--muted); font-size: 13px; }
 .reasons-copy { margin: -5px 0 18px; }
 .reasons-panel { margin-bottom: 16px; }

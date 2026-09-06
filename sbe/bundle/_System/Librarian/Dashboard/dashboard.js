@@ -231,6 +231,7 @@ function render(data) {
   $("ruflo-task-count").textContent = `${teams.active_tasks} task aperti`;
   renderProvider("antigravity-state", data.providers.antigravity);
   renderProvider("codex-state", data.providers.codex);
+  renderProvider("claude-state", data.providers.claude);
   $("ruflo-state").textContent = data.ruflo.installed && data.ruflo.memory_db
     ? (teams.available ? "Memoria + team pronti" : "Memoria pronta")
     : "Da verificare";
@@ -327,6 +328,11 @@ function render(data) {
     for (const value of [formatTime(item.time), item.cluster, item.sources || "—", item.provider || "Locale"]) {
       const cell = document.createElement("td"); cell.textContent = value; row.appendChild(cell);
     }
+    const review = document.createElement("td");
+    if (item.review_mode === "same_provider_fallback") review.appendChild(resultBadge("fallback degradato"));
+    else if (item.review_mode === "independent") review.appendChild(resultBadge("indipendente"));
+    else review.textContent = "—";
+    row.appendChild(review);
     const result = document.createElement("td");
     result.appendChild(resultBadge(item.status)); row.appendChild(result); return row;
   }));

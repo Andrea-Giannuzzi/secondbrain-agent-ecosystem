@@ -1,13 +1,13 @@
 # Second Brain Agent Ecosystem
 
-A local macOS dashboard, document Librarian, semantic search and bounded Codex–Antigravity teams coordinated through Ruflo and CLI Agent Orchestrator (CAO).
+A local macOS dashboard, document Librarian, semantic search and bounded Claude–Codex–Antigravity teams coordinated through Ruflo and CLI Agent Orchestrator (CAO).
 
 **Release candidate 0.1.0.** See [verification status](docs/verification.md) before relying on a feature. [Guida completa in italiano](docs/it/README.md).
 
 ## What runs where
 
 ```text
-VS Code or terminal: Codex / Antigravity — coordinator and only project writer
+VS Code or terminal: Claude / Codex / Antigravity — coordinator and only project writer
                          │
                     Ruflo team MCP — persistent tasks and reviewed memory
                          │
@@ -20,14 +20,22 @@ VS Code or terminal: Codex / Antigravity — coordinator and only project writer
                            read-only Second Brain MCP ← agents in any project
 ```
 
-Four roles describe a workflow; they do not imply four models running simultaneously. The reviewer prefers the provider opposite the writer. A same-provider fallback is explicitly degraded. The deterministic Librarian Executor alone writes canonical notes; coding agents only read the vault through MCP.
+Four roles describe a workflow; they do not imply four models running simultaneously. The provider of the session coordinates and writes; the other two split the remaining roles. Antigravity is the preferred investigator whenever it does not coordinate, and the reasoning provider that did not write the code reviews it:
+
+| Session provider | Investigator | Reviewer |
+| --- | --- | --- |
+| Claude | Antigravity | Codex |
+| Codex | Antigravity | Claude |
+| Antigravity | Codex | Claude |
+
+These are preferences, not constraints: an unavailable provider falls through to the next candidate, and only when no independent provider remains does review fall back to the author, explicitly degraded. The Librarian rotates the head of its own provider chain so the three share the load, and its correction pass starts from a provider that did not produce the semantics. The deterministic Librarian Executor alone writes canonical notes; coding agents only read the vault through MCP.
 
 Ruflo is a third-party coordination/memory dependency, not the canonical knowledge archive. This project is an integration and is not affiliated with OpenAI, Google, AWS or Ruflo.
 
 ## Prerequisites
 
 - macOS, Python 3.12+, Node.js 20+, npm and a local vault under your home directory.
-- At least one authenticated client: `codex` or Antigravity CLI `agy`. Both are needed for independent cross-provider review.
+- At least one authenticated client: `claude`, `codex` or Antigravity CLI `agy`. At least two are needed for independent cross-provider review.
 - `cao` and `cao-server` (tested baseline: cli-agent-orchestrator 2.5.0), `tmux`, Poppler and Tesseract.
 - VS Code is optional; the same clients work in Terminal. Remote SSH/container workspaces are outside v0.1 support.
 
@@ -38,7 +46,7 @@ brew install python@3.12 node tmux poppler tesseract
 uv tool install 'cli-agent-orchestrator==2.5.0'
 ```
 
-Install and log in to the clients using their own supported installers. `agy` must be the AI terminal client, not an IDE launcher with the same name. Tested local CLI baselines: Codex 0.153.2 and agy 1.1.27. Setup does not install, sign in to or purchase access to a provider.
+Install and log in to the clients using their own supported installers. `agy` must be the AI terminal client, not an IDE launcher with the same name. Tested local CLI baselines: Codex 0.153.2, agy 1.1.27 and Claude Code 2.1.263. Setup does not install, sign in to or purchase access to a provider.
 
 ## Install
 
@@ -77,11 +85,13 @@ From any local project directory:
 codex
 # or
 antigravity
+# or
+claude
 ```
 
 The installed policies request Second Brain when prior knowledge is relevant and Ruflo for complex work. Loading an MCP or skill does not prove it was invoked. Confirm a tool call or a team/task in the dashboard. For explicit activation, use the skill picker/completion offered by your client:
 
-| Intent | Codex prompt | Antigravity prompt |
+| Intent | Codex prompt | Antigravity / Claude prompt |
 | --- | --- | --- |
 | Prior knowledge | `$secondbrain-consult Find relevant notes and cite their paths.` | `/secondbrain-consult Find relevant notes and cite their paths.` |
 | Bounded team | `$ruflo-team Investigate, implement and review this task: …` | `/ruflo-team Investigate, implement and review this task: …` |
@@ -91,6 +101,7 @@ You can supply an initial prompt from the shell (single quotes preserve the `$`)
 ```sh
 codex -C "$PWD" '$ruflo-team Investigate and review the task described below.'
 antigravity --prompt-interactive '/ruflo-team Investigate and review the task described below.'
+claude '/ruflo-team Investigate and review the task described below.'
 ```
 
 Client versions can change skill expansion. If the skill does not appear in completion, use `/help` and request `Use the installed ruflo-team skill and its MCP tools`; inspect `sbe doctor`. Do not assume an invented `/ruflo` command exists. End-to-end expansion must be verified against the installed client version.
@@ -116,9 +127,9 @@ The search tools cannot write, read attachments, enter `_System`, or expose rest
 
 ## Quota and handoff
 
-CAO/Librarian try an eligible alternate provider when a worker call fails. When both providers cannot run, bounded circuits pause retries. Network errors are not quota measurements.
+CAO/Librarian try the eligible alternate providers when a worker call fails, and the Librarian rotates which one leads each cycle. When none can run, bounded circuits pause retries. Network errors are not quota measurements.
 
-A writer session with no quota cannot start another extension itself. Open the other provider in the same project and say:
+A writer session with no quota cannot start another client itself. Open another provider in the same project and say:
 
 > Use ruflo-team. The previous writer returned a confirmed quota exhaustion error. List the active teams, take over the matching team and continue its open tasks. Do not call the exhausted provider again. Mark same-provider review as degraded.
 

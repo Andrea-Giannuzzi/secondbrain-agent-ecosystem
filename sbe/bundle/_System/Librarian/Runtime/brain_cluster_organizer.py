@@ -78,6 +78,12 @@ PROVIDER_CHAIN = (
         "semantic_profile": "librarian_codex_cluster_semantic",
         "review_profile": "librarian_codex_cluster_semantic_reviewer",
     },
+    {
+        "name": "claude",
+        "provider": "claude_code",
+        "semantic_profile": "librarian_claude_cluster_semantic",
+        "review_profile": "librarian_claude_cluster_semantic_reviewer",
+    },
 )
 MAX_CLUSTER_SIZE = 10
 MAX_AI_ATTEMPTS = 2
@@ -177,6 +183,7 @@ def provider_circuit_default():
         "last_errors": [],
         "last_success_at": None,
         "last_success_provider": None,
+        "rotation_head": None,
     }
 
 
@@ -232,10 +239,27 @@ def provider_circuit_status(at=None):
     return state
 
 
-def begin_provider_cycle(at=None):
+def rotated_chain(head):
+    """Chain starting at `head`, so the three providers take turns leading."""
+    names = [provider["name"] for provider in PROVIDER_CHAIN]
+    offset = names.index(head) if head in names else 0
+    return PROVIDER_CHAIN[offset:] + PROVIDER_CHAIN[:offset]
+
+
+def _advance_rotation(state):
+    names = [provider["name"] for provider in PROVIDER_CHAIN]
+    head = state.get("rotation_head")
+    state["rotation_head"] = names[(names.index(head) + 1) % len(names)] if head in names else names[0]
+
+
+def begin_provider_cycle(at=None, advance=True):
     at = at or now()
 
     def update(state):
+        # A review cycle reuses the head of the cluster it is correcting, so only
+        # a fresh semantic cycle moves the rotation on.
+        if advance:
+            _advance_rotation(state)
         if state.get("state") == "closed":
             return True
         next_probe = _as_datetime(state.get("next_probe_at"))
@@ -259,6 +283,7 @@ def record_provider_success(provider, at=None):
     def update(state):
         clean = provider_circuit_default()
         clean.update({
+            "rotation_head": state.get("rotation_head"),
             "last_success_at": at.isoformat(timespec="seconds"),
             "last_success_provider": provider,
             "updated_at": iso(),
@@ -270,7 +295,7 @@ def record_provider_success(provider, at=None):
     return state
 
 
-def record_dual_provider_failure(attempts, at=None):
+def record_provider_cycle_failure(attempts, at=None):
     at = at or now()
 
     def update(state):
@@ -311,6 +336,7 @@ def reset_provider_circuit(at=None):
     def update(state):
         clean = provider_circuit_default()
         clean.update({
+            "rotation_head": state.get("rotation_head"),
             "reset_at": at.isoformat(timespec="seconds"),
             "updated_at": iso(),
         })
@@ -667,6 +693,52 @@ def check_server():
         raise RuntimeError("cao-server is not reachable. Start `cao-server`.") from exc
 
 
+CODEX_CONFIG = Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser() / "config.toml"
+
+
+def codex_trust_block(workspace: Path):
+    return f'\n[projects.{json.dumps(str(workspace.resolve()))}]\ntrust_level = "trusted"\n'
+
+
+def declare_codex_trust(workspace: Path):
+    """Pre-declare the staging workspace so Codex never has to persist trust.
+
+    Codex asks about a directory it has not seen and then writes the answer back
+    into its own configuration. That write fails whenever any unrelated entry in
+    the file does not pass its stricter write-time validation, and the worker
+    then sits on a prompt until the CAO step times out ten minutes later — once
+    per cluster, in a service that runs unattended. Trust is not inherited from
+    parent directories, so the exact staging directory is declared here and
+    withdrawn when the step ends. The block is appended and removed verbatim
+    rather than through a parser, so every other byte of the user's own file is
+    left exactly as it was.
+    """
+    block = codex_trust_block(workspace)
+    try:
+        current = CODEX_CONFIG.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    if block in current:
+        return None
+    try:
+        CODEX_CONFIG.write_text(current + block, encoding="utf-8")
+    except OSError:
+        return None
+    return block
+
+
+def withdraw_codex_trust(block):
+    """Remove exactly the declaration this step added; never touch anything else."""
+    if not block:
+        return
+    try:
+        current = CODEX_CONFIG.read_text(encoding="utf-8")
+        if block in current:
+            CODEX_CONFIG.write_text(current.replace(block, "", 1), encoding="utf-8")
+    except OSError:
+        return
+
+
 def run_step(workspace: Path, prompt: str, profile: str, provider: str):
     if "\n" in prompt or "\r" in prompt:
         raise ValueError("CAO prompt must be one physical line.")
@@ -692,17 +764,32 @@ def run_step(workspace: Path, prompt: str, profile: str, provider: str):
             time.sleep(5 * attempt)
 
 
-def run_with_fallback(workspace: Path, prompt: str, reviewing=False):
-    allowed, state = begin_provider_cycle()
+def review_order(chain, author):
+    """Independent providers first; the author closes the list as degraded fallback."""
+    independent = [provider for provider in chain if provider["name"] != author]
+    authored = [provider for provider in chain if provider["name"] == author]
+    return independent + authored
+
+
+def run_with_fallback(workspace: Path, prompt: str, reviewing=False, author=None):
+    allowed, state = begin_provider_cycle(advance=not reviewing)
     if not allowed:
         raise ProviderCircuitOpen(state)
 
+    chain = rotated_chain(state.get("rotation_head"))
+    if reviewing and author:
+        chain = review_order(chain, author)
+
     attempts = []
-    for provider in PROVIDER_CHAIN:
+    for provider in chain:
         profile_key = "review_profile" if reviewing else "semantic_profile"
         profile = provider[profile_key]
+        codex_trust = declare_codex_trust(workspace) if provider["name"] == "codex" else None
         try:
-            result = run_step(workspace, prompt, profile, provider["provider"])
+            try:
+                result = run_step(workspace, prompt, profile, provider["provider"])
+            finally:
+                withdraw_codex_trust(codex_trust)
             status = str(result.get("status", "")).casefold()
             if status in {"error", "failed", "timeout", "timed_out"}:
                 raise RuntimeError(f"CAO returned provider status {status!r}")
@@ -726,7 +813,7 @@ def run_with_fallback(workspace: Path, prompt: str, reviewing=False):
         record_provider_success(provider["name"])
         return result, provider, attempts
 
-    state = record_dual_provider_failure(attempts)
+    state = record_provider_cycle_failure(attempts)
     raise ProvidersUnavailable(attempts, state)
 
 
@@ -932,6 +1019,7 @@ def process_cluster(title, records, batch, apply, executor):
         previous_bundle = None
         provider_attempts = []
         ruflo_escalation = None
+        semantic_provider = None
 
         for ai_attempt in range(1, MAX_AI_ATTEMPTS + 1):
             reviewing = previous is not None
@@ -950,6 +1038,7 @@ def process_cluster(title, records, batch, apply, executor):
                     workspace,
                     prompt_for(retry=reviewing),
                     reviewing=reviewing,
+                    author=semantic_provider if reviewing else None,
                 )
                 provider_attempts.extend(cycle_attempts)
             except ProviderCircuitOpen as exc:
@@ -998,6 +1087,17 @@ def process_cluster(title, records, batch, apply, executor):
                     "provider_circuit": exc.state,
                 }
             profile = provider["review_profile" if reviewing else "semantic_profile"]
+            if reviewing:
+                review_independent = provider["name"] != semantic_provider
+                write_run_manifest(
+                    run_dir,
+                    semantic_provider=semantic_provider,
+                    review_provider=provider["name"],
+                    review_independent=review_independent,
+                    review_mode="independent" if review_independent else "same_provider_fallback",
+                )
+            else:
+                semantic_provider = provider["name"]
             raw = str(result.get("last_message", ""))
             (run_dir / f"attempt-{ai_attempt}-{provider['name']}-raw.txt").write_text(raw, encoding="utf-8")
             try:

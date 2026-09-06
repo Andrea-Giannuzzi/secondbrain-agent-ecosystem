@@ -166,17 +166,22 @@ class LibrarianDashboardTests(unittest.TestCase):
             root = Path(temp)
             codex = root / "codex"
             antigravity = root / "antigravity"
+            claude = root / "claude"
             (codex / "2026/09/04").mkdir(parents=True)
             (antigravity / "log").mkdir(parents=True)
+            (claude / "-Users-x-project").mkdir(parents=True)
             codex_session = codex / "2026/09/04/session.jsonl"
             antigravity_log = antigravity / "log/cli.log"
+            claude_session = claude / "-Users-x-project/session.jsonl"
             codex_session.write_text("SECRET PROMPT", encoding="utf-8")
             antigravity_log.write_text("SECRET OUTPUT", encoding="utf-8")
+            claude_session.write_text("SECRET TRANSCRIPT", encoding="utf-8")
             os.utime(codex_session, (100, 100))
             os.utime(antigravity_log, (200, 200))
-            with patch.multiple(dashboard, CODEX_SESSIONS=codex, ANTIGRAVITY_CLI=antigravity, ANTIGRAVITY_APP=root / "missing", ANTIGRAVITY_IDE=root / "missing2"):
+            os.utime(claude_session, (300, 300))
+            with patch.multiple(dashboard, CODEX_SESSIONS=codex, CLAUDE_SESSIONS=claude, ANTIGRAVITY_CLI=antigravity, ANTIGRAVITY_APP=root / "missing", ANTIGRAVITY_IDE=root / "missing2"):
                 activity = dashboard.general_provider_activity()
-            self.assertEqual([item["provider"] for item in activity], ["antigravity", "codex"])
+            self.assertEqual([item["provider"] for item in activity], ["claude", "antigravity", "codex"])
             self.assertTrue(all(item["privacy"] == "metadata_only" for item in activity))
             self.assertNotIn("SECRET", json.dumps(activity))
 
@@ -247,9 +252,9 @@ class LibrarianDashboardTests(unittest.TestCase):
             self.assertEqual(value["teams"][0]["unavailable_providers"], ["antigravity"])
             self.assertEqual(value["teams"][0]["last_handoff"]["to_provider"], "codex")
             investigator_task = next(item for item in value["tasks"] if item["task_id"] == "one")
-            self.assertEqual(investigator_task["provider"], "codex")
-            self.assertEqual(value["agents"][0]["provider"], "codex")
-            self.assertEqual(value["agents"][0]["eligible_providers"], ["codex"])
+            self.assertEqual(investigator_task["provider"], "codex o claude")
+            self.assertEqual(value["agents"][0]["provider"], "codex o claude")
+            self.assertEqual(value["agents"][0]["eligible_providers"], ["codex", "claude"])
             reviewer = next(item for item in value["tasks"] if item["task_id"] == "two")
             self.assertEqual(reviewer["review_mode"], "same_provider_fallback")
             self.assertEqual(reviewer["worker_verdict"], "PASS")

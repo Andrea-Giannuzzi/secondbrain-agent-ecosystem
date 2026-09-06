@@ -141,6 +141,75 @@ def configure_cli_alias(alias_path: Path, agy: Path) -> bool:
     return True
 
 
+def verify_claude_mcp(config_path: Path, expected: dict[str, str]) -> None:
+    """Read-only check of the user-scope servers registered by `claude mcp add`.
+
+    ~/.claude.json also carries the user's project history, so it is never
+    rewritten here: registration stays with the Claude CLI, as it does with
+    `codex mcp add`.
+    """
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
+    except (OSError, ValueError) as exc:
+        raise ValueError("Claude configuration is not valid JSON") from exc
+    if not isinstance(data, dict):
+        raise ValueError("Claude configuration must be a JSON object")
+    servers = data.get("mcpServers")
+    if not isinstance(servers, dict):
+        raise ValueError("Claude mcpServers is missing; run claude mcp add")
+    for name, command in expected.items():
+        server = servers.get(name)
+        if not isinstance(server, dict) or server.get("command") != command:
+            raise ValueError(f"Claude MCP server is not registered: {name}")
+
+
+def grant_claude_workspace_trust(config_path: Path, roots) -> bool:
+    """Pre-accept the workspace trust dialog for the CAO snapshot roots.
+
+    CAO drives Claude Code interactively and answers its startup dialogs by
+    keystroke, but it confirms the trust dialog with a bare Enter while the
+    selected option is still "No, exit", so a worker launched in a directory
+    Claude has never seen exits immediately and the run only fails on the
+    initialization timeout. Claude records trust per directory and subdirectories
+    inherit it, so trusting the two roots that hold generated snapshots is enough
+    and no per-task write is ever needed. Both roots are created by the Librarian
+    and the team bridge and hold only redacted copies. Trust answers "is this
+    content safe to read", not "what may this worker do": tool permission stays
+    with the profile's permissionMode and its disallowed tools.
+    """
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
+    except (OSError, ValueError) as exc:
+        raise ValueError("Claude configuration is not valid JSON") from exc
+    if not isinstance(data, dict):
+        raise ValueError("Claude configuration must be a JSON object")
+    projects = data.setdefault("projects", {})
+    if not isinstance(projects, dict):
+        raise ValueError("Claude projects must be a JSON object")
+    changed = False
+    for root in roots:
+        entry = projects.setdefault(str(Path(root).expanduser().resolve()), {})
+        if not isinstance(entry, dict):
+            raise ValueError("Claude project entry must be a JSON object")
+        if entry.get("hasTrustDialogAccepted") is not True:
+            entry["hasTrustDialogAccepted"] = True
+            changed = True
+    if changed:
+        atomic_private_write(config_path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+    return changed
+
+
+def install_claude_access(home: Path, source: Path):
+    """Install the managed skills for Claude Code; MCP registration stays with the CLI."""
+    root = home / ".claude/skills"
+    contents = {name: (source / name / "SKILL.md").read_text() for name in ("secondbrain-consult", "ruflo-team")}
+    for name, content in contents.items():
+        target = root / name / "SKILL.md"
+        atomic_private_write(target, content)
+        target.parent.chmod(0o700)
+    root.chmod(0o700)
+
+
 def install_antigravity_access(home: Path, source: Path, agy: Path):
     config = home / ".gemini/config/skills.json"
     root = home / ".gemini/config/skills/secondbrain-ecosystem"
@@ -176,9 +245,24 @@ def main() -> int:
     ecosystem.add_argument("--home", type=Path, required=True)
     ecosystem.add_argument("--source", type=Path, required=True)
     ecosystem.add_argument("--agy", type=Path, required=True)
+    claude = subparsers.add_parser("claude-access")
+    claude.add_argument("--home", type=Path, required=True)
+    claude.add_argument("--source", type=Path, required=True)
+    claude_mcp = subparsers.add_parser("claude-verify-mcp")
+    claude_mcp.add_argument("--config", type=Path, required=True)
+    claude_mcp.add_argument("--server", action="append", default=[], metavar="NAME=COMMAND")
+    claude_trust = subparsers.add_parser("claude-trust")
+    claude_trust.add_argument("--config", type=Path, required=True)
+    claude_trust.add_argument("--root", action="append", type=Path, default=[], required=True)
     args = parser.parse_args()
     if args.operation == "antigravity-access":
         install_antigravity_access(args.home, args.source, args.agy)
+    elif args.operation == "claude-access":
+        install_claude_access(args.home, args.source)
+    elif args.operation == "claude-verify-mcp":
+        verify_claude_mcp(args.config, dict(item.split("=", 1) for item in args.server))
+    elif args.operation == "claude-trust":
+        grant_claude_workspace_trust(args.config, args.root)
     elif args.operation == "antigravity":
         configure_antigravity(args.config, args.command, args.name)
     elif args.operation == "policy":

@@ -88,11 +88,12 @@ def agent_inventory(home=None):
         except (OSError, ValueError):
             issues.append(dict(provider=provider, origin=origin, status='invalid'))
 
-    for provider, rel in [('codex', '.codex/config.toml'), ('antigravity', '.gemini/config/mcp_config.json')]:
+    for provider, rel in [('codex', '.codex/config.toml'), ('antigravity', '.gemini/config/mcp_config.json'), ('claude', '.claude.json')]:
         inspect_config(provider, rel)
     for rel in ('.codex/skills', '.agents/skills'):
         skills('codex', home / rel, '~/' + rel)
     skills('antigravity', home / '.gemini/config/skills', '~/.gemini/config/skills')
+    skills('claude', home / '.claude/skills', '~/.claude/skills')
     config = home / '.gemini/config/skills.json'
     if config.exists() or config.is_symlink():
         try:
@@ -122,6 +123,20 @@ def agent_inventory(home=None):
                 add(provider, 'Hook', name, '~/' + rel, 'invalid' if not valid else 'disabled' if cfg.get('enabled') is False else 'configured', events=events)
         except (OSError, ValueError, TypeError):
             issues.append(dict(provider=provider, origin='~/' + rel, status='invalid'))
+    # Claude Code keys hooks by event, then by matcher, instead of by hook name.
+    path = home / '.claude/settings.json'
+    if path.exists() or path.is_symlink():
+        try:
+            data = read(path)
+            hooks = data.get('hooks', {}) if isinstance(data, dict) else None
+            if not isinstance(hooks, dict):
+                raise ValueError('hooks object required')
+            for event, matchers in hooks.items():
+                add('claude', 'Hook', event, '~/.claude/settings.json',
+                    'configured' if isinstance(matchers, list) and matchers else 'invalid',
+                    events=[label(event)])
+        except (OSError, ValueError, TypeError, AttributeError):
+            issues.append(dict(provider='claude', origin='~/.claude/settings.json', status='invalid'))
     # Plugin configuration is also global. Cache presence alone does not prove enablement.
     for provider, rel, config_rel in [('antigravity', '.gemini/config/plugins', '.gemini/config/config.json'), ('codex', '.codex/plugins/cache', '.codex/config.toml')]:
         base = home / rel
