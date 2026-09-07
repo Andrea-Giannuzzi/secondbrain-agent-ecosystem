@@ -1,0 +1,44 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx {{name}}*)",
+      "mcp__{{name}}__*",
+      "mcp__code_index__*",
+      "Bash(npm test*)",
+      "Bash(npm run*)",
+      "Bash(git diff*)",
+      "Bash(git status*)",
+      "Bash(git log*)",
+      "Bash(git show*)",
+      "Bash(cargo bench*)",
+      "Bash(cargo test*)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Bash(git push*)",
+      "Bash(rm -rf*)",
+      "Bash(npm publish*)"
+    ]
+  },
+  "mcpServers": {
+    "{{name}}": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "{{name}}@latest",
+        "mcp",
+        "start"
+      ]
+    },
+    "code_index": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "{{name}}@latest",
+        "mcp",
+        "index"
+      ]
+    }
+  }
+}

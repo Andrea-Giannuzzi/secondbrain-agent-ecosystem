@@ -1,0 +1,23 @@
+# Knowledge Base for {{name}}
+
+Drop articles in this directory as markdown files. The `kb-searcher` agent
+finds them by semantic search via the kernel memory bridge — no schema
+required, no registration step.
+
+## Convention
+
+```markdown
+# <Article title>
+
+Tags: billing, refund, plan-change
+
+<Body of the article — be specific and direct.>
+```
+
+The retriever indexes the title, tags, and first paragraph. Detail in the
+body is searchable but ranked lower than tags.
+
+## Versioning
+
+KB articles ship with the harness — when you `npm publish`, the KB bundle
+ships too. Users get your latest articles on `npm update`.

@@ -73,7 +73,16 @@ class StdioTests(unittest.IsolatedAsyncioTestCase):
                 async with ClientSession(read,write) as session:
                     await session.initialize()
                     tools={tool.name:tool for tool in (await session.list_tools()).tools}
-                    self.assertEqual(len(tools),10)
+                    # Named, not counted: adding or removing a tool changes the
+                    # server's contract, so it should be a deliberate edit here
+                    # and the failure should say which tool moved.
+                    self.assertEqual(sorted(tools),[
+                        "create_ruflo_task","create_ruflo_team","get_ruflo_team_status",
+                        "list_ruflo_teams","recall_ruflo_team_memory",
+                        "record_ruflo_review_outcome","record_ruflo_verified_outcome",
+                        "run_ruflo_readonly_task","stop_ruflo_team",
+                        "take_over_ruflo_team","update_ruflo_task",
+                    ])
                     self.assertIn("writer_provider",tools["create_ruflo_team"].input_schema["required"])
                     result=await session.call_tool("list_ruflo_teams",{})
                     self.assertFalse(result.is_error)

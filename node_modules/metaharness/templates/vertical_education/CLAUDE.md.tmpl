@@ -1,0 +1,33 @@
+# {{name}}
+
+{{description}}
+
+> Education / Tutoring harness · domain: `learning`. Generated with [create-agent-harness](https://github.com/ruvnet/agent-harness-generator).
+
+## Behavioral rules
+
+- Use the harness's MCP tools (`mcp__{{name}}__*`) for orchestration
+- Memory and routing are handled by the kernel — you don't need to learn them
+- Defer destructive operations to the user
+
+## Agents
+
+| Agent | Tier | Role |
+|---|---|---|
+| `tutor` | sonnet | Picks the next concept to teach from the learner's mastery map. |
+| `explainer` | sonnet | Explains the picked concept at the right depth. |
+| `quiz-master` | haiku | Generates calibrated quiz items. |
+| `grader` | sonnet | Grades open-ended responses against the hidden rubric. |
+## Skills
+
+- `/memory-inspect` — Search and inspect the harness memory namespace (HNSW + emergent-time decay).
+- `/teach-next` — Run one teaching cycle: pick next concept → explain → quiz → grade → update mastery.
+
+## Commands
+
+- `doctor` — Health-check the harness: kernel load, MCP wiring, memory backend, host adapter.
+- `mastery-report` — Summarise the learner's current mastery map and recommend the next session's focus.
+
+## Architecture
+
+This harness uses [@metaharness/kernel](https://www.npmjs.com/package/@metaharness/kernel) — a Rust-compiled WASM module with a NAPI-RS native fallback — so the same code runs identically on every platform.
