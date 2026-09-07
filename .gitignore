@@ -5,6 +5,9 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+# CI installs these with `npm ci`; reproducing that run inside a working copy
+# is what put 19k vendored files into a release commit.
+node_modules/
 .DS_Store
 .env
 *.log
