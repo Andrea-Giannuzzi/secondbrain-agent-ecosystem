@@ -327,8 +327,18 @@ def configure_clients(tx, providers, commands, bundle, executables):
         tx.write(cfg, tomlkit.dumps(data).encode(), merge=True)
         profile = 'model_provider = "openai"\nsandbox_mode = "read-only"\napproval_policy = "never"\n'
         # Disable inherited MCPs in CAO workers, including project-write tools.
-        for name in servers:
-            profile += "\n[mcp_servers."+json.dumps(name)+"]\nenabled = false\n"
+        # Each entry must still carry the server's transport: Codex validates
+        # every mcp_servers table for one, and an entry holding only
+        # `enabled = false` is rejected as "invalid transport". That rejection
+        # lands on the config WRITE path, which is what Codex uses to persist a
+        # workspace-trust decision -- so the worker sat on an unanswerable trust
+        # dialog until the step timed out, with the disabling itself as cause.
+        for name, row in servers.items():
+            profile += "\n[mcp_servers."+json.dumps(name)+"]\n"
+            command = row.get("command") if hasattr(row, "get") else None
+            if command:
+                profile += "command = "+json.dumps(str(command))+"\nargs = []\n"
+            profile += "enabled = false\n"
         tx.write(home/".codex/sbe_readonly.config.toml", profile.encode())
         for skill in ("ruflo-team", "secondbrain-consult"):
             tx.write(home/".codex/skills"/skill/"SKILL.md", (bundle/"AgentAccess/Skills"/skill/"SKILL.md").read_bytes())

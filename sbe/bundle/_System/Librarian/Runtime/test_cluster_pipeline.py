@@ -1,3 +1,4 @@
+import io
 import json
 import datetime as dt
 import sys
@@ -238,29 +239,6 @@ class ClusterPipelineTests(unittest.TestCase):
         self.assertEqual(run.call_count, len(organizer.PROVIDER_CHAIN))
         record.assert_called_once()
         self.assertEqual(len(raised.exception.attempts), len(organizer.PROVIDER_CHAIN))
-
-    def test_codex_trust_is_declared_for_the_step_and_withdrawn_after(self):
-        response = {"status": "completed", "last_message": "{}"}
-        with tempfile.TemporaryDirectory() as temp, self.circuit_paths(temp):
-            config = Path(temp) / "config.toml"
-            config.write_text('[mcp_servers.keep]\ncommand = "keep"\n', encoding="utf-8")
-            workspace = Path(temp) / "workspace"
-            workspace.mkdir()
-            seen = []
-
-            def observe(ws, prompt, profile, provider):
-                # Codex must already be trusted while its own step runs.
-                seen.append((provider, str(workspace.resolve()) in config.read_text()))
-                return response
-
-            with patch.object(organizer, "CODEX_CONFIG", config):
-                with patch.object(organizer, "run_step", side_effect=observe):
-                    run_with_fallback(workspace, "prompt")
-                    run_with_fallback(workspace, "prompt")
-            self.assertIn(("codex", True), seen)
-            self.assertTrue(all(not trusted for name, trusted in seen if name != "codex"))
-            # Nothing this step added may survive it.
-            self.assertEqual(config.read_text(), '[mcp_servers.keep]\ncommand = "keep"\n')
 
     def test_semantic_head_rotates_between_the_three_providers(self):
         response = {"status": "completed", "last_message": "{}"}
@@ -560,6 +538,73 @@ class ClusterPipelineTests(unittest.TestCase):
                 with patch.object(ruflo_memory_adapter, "_mcp_exec", return_value={"success": True}) as execute:
                     ruflo_memory_adapter.finish_semantic_escalation(escalation, True, "validated")
         self.assertEqual([call.args[0] for call in execute.call_args_list], ["task_complete", "swarm_shutdown"])
+
+
+class WorkerDeliveryTests(unittest.TestCase):
+    """The pane says nothing about when an unattended worker has finished.
+
+    CAO ends a step at the first pane read that looks complete, with none of the
+    stability it demands of an idle pane, so a worker that prints before it
+    starts working is captured mid-thought and torn down. Here that cost a whole
+    re-run each time: a truncated answer fails the schema and the caller retries
+    the provider. The worker now delivers its object out of band.
+    """
+
+    def test_delivered_payload_replaces_a_pane_that_only_looked_finished(self):
+        with tempfile.TemporaryDirectory() as temp:
+            workspace = Path(temp) / "run" / "workspace"
+            workspace.mkdir(parents=True)
+            payload = {"cluster": "C", "decision": "create"}
+
+            def http_json(method, path, body=None, timeout=20):
+                if path == "/terminals/run-step":
+                    self.assertFalse(body["teardown"], "CAO teardown would kill a live worker")
+                    (workspace.parent / organizer.REPORT_NAME).write_text(
+                        json.dumps({"version": "worker-output-1.0", "payload": payload}),
+                        encoding="utf-8",
+                    )
+                    return {
+                        "terminal_id": "t1", "status": "completed",
+                        "last_message": "\u2022 Reading CLUSTER_CONTEXT.json",
+                    }
+                raise AssertionError(path)
+
+            with patch.object(organizer, "http_json", side_effect=http_json), patch.object(
+                organizer, "release_terminal"
+            ) as release:
+                result = organizer.run_step(workspace, "p", "prof", "antigravity_cli")
+            self.assertEqual(json.loads(result["last_message"]), payload)
+            self.assertIsNone(provider_result_error(result))
+            release.assert_called_once_with("t1")
+
+    def test_terminal_kept_alive_is_released_even_when_the_step_fails(self):
+        with tempfile.TemporaryDirectory() as temp:
+            workspace = Path(temp) / "run" / "workspace"
+            workspace.mkdir(parents=True)
+            import urllib.error
+
+            def http_json(method, path, body=None, timeout=20):
+                raise urllib.error.HTTPError(
+                    path, 500, "boom", None,
+                    io.BytesIO(json.dumps({"detail": {"terminal_id": "t9"}}).encode()),
+                )
+
+            with patch.object(organizer, "http_json", side_effect=http_json), patch.object(
+                organizer, "release_terminal"
+            ) as release:
+                with self.assertRaises(RuntimeError):
+                    organizer.run_step(workspace, "p", "prof", "antigravity_cli")
+            release.assert_called_once_with("t9")
+
+    def test_no_terminal_means_nothing_left_to_wait_for(self):
+        with tempfile.TemporaryDirectory() as temp:
+            workspace = Path(temp) / "run" / "workspace"
+            workspace.mkdir(parents=True)
+            self.assertIsNone(
+                organizer.await_worker_output(
+                    workspace.parent / organizer.REPORT_NAME, None, 0.0
+                )
+            )
 
 
 if __name__ == "__main__":

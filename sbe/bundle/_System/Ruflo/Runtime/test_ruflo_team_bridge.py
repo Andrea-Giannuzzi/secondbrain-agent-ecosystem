@@ -1,10 +1,13 @@
 import json
+import re
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 import ruflo_team_bridge as bridge
+import worker_report_mcp as delivery
 
 
 class RufloTeamBridgeTests(unittest.TestCase):
@@ -25,7 +28,7 @@ class RufloTeamBridgeTests(unittest.TestCase):
             RUFLO_DB=root / "data/memory.db",
         )
 
-    def seed_team(self, root: Path, project: Path, *, task_role="investigator", writer_provider="codex"):
+    def seed_team(self, root: Path, project: Path, *, task_role="reviewer", writer_provider="codex"):
         state_dir = root / "state"
         state_dir.mkdir(parents=True)
         state = bridge._default_state()
@@ -88,33 +91,48 @@ class RufloTeamBridgeTests(unittest.TestCase):
             self.assertEqual([name for name, _ in calls].count("agent_spawn"), 4)
             self.assertFalse(calls[0][1]["config"]["autopilot"])
 
-    def test_role_matrix_assigns_reviewer_and_investigator_per_session_provider(self):
-        # The session provider coordinates and writes; the other two split the rest.
+    def test_only_review_is_assigned_a_provider(self):
+        # The session provider coordinates and writes; the reasoning provider that
+        # did not write the code reviews it. Nothing else is delegated: investigation
+        # through CAO reads a redacted snapshot without tools, history or context.
         self.assertEqual(bridge._writer_and_reviewer("claude"), ("claude", "codex"))
         self.assertEqual(bridge._writer_and_reviewer("codex"), ("codex", "claude"))
         self.assertEqual(bridge._writer_and_reviewer("antigravity"), ("antigravity", "claude"))
-        self.assertEqual(bridge._investigator_candidates("claude")[0], "antigravity")
-        self.assertEqual(bridge._investigator_candidates("codex")[0], "antigravity")
-        self.assertEqual(bridge._investigator_candidates("antigravity")[0], "codex")
-        for coordinator in bridge.PROVIDERS:
-            reviewer = bridge._reviewer_candidates(coordinator)
-            investigator = bridge._investigator_candidates(coordinator)
-            self.assertNotEqual(reviewer[0], coordinator)
-            self.assertNotEqual(investigator[0], coordinator)
-            self.assertNotEqual(reviewer[0], investigator[0])
-            # Every provider stays reachable, the writer last and only as fallback.
-            self.assertEqual(reviewer[-1], coordinator)
-            self.assertEqual(sorted(set(reviewer)), sorted(bridge.PROVIDERS))
-            self.assertEqual(sorted(set(investigator)), sorted(bridge.PROVIDERS))
-        with self.assertRaisesRegex(bridge.BridgeError, "writer_provider"):
-            bridge._writer_and_reviewer("other")
+        self.assertEqual(bridge.READONLY_ROLES, {"reviewer"})
+        self.assertFalse(hasattr(bridge, "_investigator_candidates"))
+        for writer in bridge.PROVIDERS:
+            reviewer = bridge._reviewer_candidates(writer)
+            # The author never leads and always closes the list: it is the last
+            # resort, and reaching it is what marks the review degraded.
+            self.assertNotEqual(reviewer[0], writer)
+            self.assertEqual(reviewer[-1], writer)
+            self.assertEqual(sorted(reviewer), sorted(bridge.PROVIDERS))
 
-    def test_investigator_preference_may_override_the_matrix_head(self):
-        self.assertEqual(
-            bridge._investigator_candidates("claude", "codex"), ["codex", "antigravity", "claude"]
-        )
-        with self.assertRaisesRegex(bridge.BridgeError, "provider_preference"):
-            bridge._investigator_candidates("claude", "other")
+    def test_investigation_is_refused_and_says_where_it_belongs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            project = root / "project"
+            project.mkdir()
+            with self.runtime(root):
+                self.seed_team(root, project, task_role="investigator")
+                with patch.object(bridge, "_ruflo_exec", return_value={"success": True}), patch.object(
+                    bridge, "_cao_post"
+                ) as cao:
+                    with self.assertRaisesRegex(bridge.BridgeError, "Investigation belongs to the coordinator"):
+                        bridge.run_ruflo_readonly_task("team-safe", "task-safe", "Inspect", [])
+                    cao.assert_not_called()
+
+    def test_the_coordinator_closes_its_own_investigation(self):
+        """No longer a CAO role, so it completes like coordinator and executor work."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            project = root / "project"
+            project.mkdir()
+            with self.runtime(root):
+                self.seed_team(root, project, task_role="investigator")
+                with patch.object(bridge, "_ruflo_exec", return_value={"success": True}):
+                    result = bridge.update_ruflo_task("team-safe", "task-safe", "completed")
+            self.assertEqual(result["status"], "completed")
 
     def test_coordinator_and_writer_must_match_session_provider(self):
         team = {
@@ -151,7 +169,7 @@ class RufloTeamBridgeTests(unittest.TestCase):
             with self.runtime(root):
                 self.seed_team(root, project, task_role="executor")
                 with patch.object(bridge, "_cao_post") as cao:
-                    with self.assertRaisesRegex(bridge.BridgeError, "VS Code agent owns writes"):
+                    with self.assertRaisesRegex(bridge.BridgeError, "Only a reviewer task runs through CAO"):
                         bridge.run_ruflo_readonly_task(
                             "team-safe", "task-safe", "Change code", ["code.py"]
                         )
@@ -169,9 +187,9 @@ class RufloTeamBridgeTests(unittest.TestCase):
                     bridge, "_cao_post", side_effect=[bridge.BridgeError("quota"), {"status": "completed", "last_message": "code.py:1 is fine\nVERDICT: PASS"}]
                 ):
                     result = bridge.run_ruflo_readonly_task(
-                        "team-safe", "task-safe", "Inspect", ["code.py"], "antigravity"
+                        "team-safe", "task-safe", "Inspect", ["code.py"]
                     )
-                self.assertEqual(result["provider"], "claude")
+                self.assertEqual(result["provider"], "antigravity")
                 self.assertEqual(result["status"], "completed")
                 state = json.loads((root / "state/teams.json").read_text())
                 task = state["teams"]["team-safe"]["tasks"]["task-safe"]
@@ -180,120 +198,7 @@ class RufloTeamBridgeTests(unittest.TestCase):
                 self.assertEqual([item["status"] for item in task["provider_attempts"]], ["unavailable", "completed"])
                 self.assertTrue(all(item.get("started_at") for item in task["provider_attempts"]))
                 self.assertTrue(all(item.get("ended_at") for item in task["provider_attempts"]))
-                self.assertEqual(task["provider_attempts"][1]["profile"], "ruflo_claude_readonly_worker")
-
-    def test_delivered_report_is_preferred_over_the_terminal_capture(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            project = root / "project"
-            project.mkdir()
-            (project / "code.py").write_text("print('ok')", encoding="utf-8")
-            with self.runtime(root):
-                self.seed_team(root, project, task_role="reviewer", writer_provider="antigravity")
-                runs = root / "runs/team-safe/task-safe"
-
-                def deliver(body, timeout=660):
-                    # The worker answers through the tool while the pane is still
-                    # rendering, so the capture below stays truncated on purpose.
-                    bridge._atomic_json(runs / "worker-report.json", {
-                        "version": "worker-report-1.0", "verdict": "BLOCKED",
-                        "report": "code.py:1 divides by zero on empty input", "truncated": False,
-                    })
-                    return {"status": "completed", "last_message": "Reviewed code.py. Findings"}
-
-                with patch.object(bridge, "_ruflo_exec", return_value={"success": True}), patch.object(
-                    bridge, "_cao_post", side_effect=deliver
-                ) as cao:
-                    result = bridge.run_ruflo_readonly_task(
-                        "team-safe", "task-safe", "Review", ["code.py"]
-                    )
-                self.assertEqual(cao.call_count, 1)
-                self.assertEqual(result["provider"], "claude")
-                self.assertEqual(result["worker_verdict"], "BLOCKED")
-                self.assertIn("divides by zero", result["result"])
-                state = json.loads((root / "state/teams.json").read_text())
-                attempt = state["teams"]["team-safe"]["tasks"]["task-safe"]["provider_attempts"][0]
-                self.assertEqual(attempt["delivery"], "report_channel")
-                # The tool is allowed for this run only, inside the staged snapshot.
-                allowed = json.loads((runs / "workspace/.claude/settings.local.json").read_text())
-                self.assertEqual(allowed["permissions"]["allow"], [bridge.REPORT_TOOL])
-
-    def test_a_stale_report_is_cleared_before_the_worker_runs(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            project = root / "project"
-            project.mkdir()
-            (project / "code.py").write_text("print('ok')", encoding="utf-8")
-            with self.runtime(root):
-                self.seed_team(root, project, task_role="reviewer", writer_provider="antigravity")
-                runs = root / "runs/team-safe/task-safe"
-                runs.mkdir(parents=True)
-                bridge._atomic_json(runs / "worker-report.json", {
-                    "version": "worker-report-1.0", "verdict": "PASS",
-                    "report": "stale answer from an earlier run", "truncated": False,
-                })
-                with patch.object(bridge, "_ruflo_exec", return_value={"success": True}), patch.object(
-                    bridge, "_cao_post", return_value={"status": "completed", "last_message": "Reviewed.VERDICT:PASS"}
-                ):
-                    result = bridge.run_ruflo_readonly_task(
-                        "team-safe", "task-safe", "Review", ["code.py"]
-                    )
-                # The stale file was removed, so the answer came from the capture.
-                self.assertNotIn("stale answer", result["result"])
-                state = json.loads((root / "state/teams.json").read_text())
-                attempt = state["teams"]["team-safe"]["tasks"]["task-safe"]["provider_attempts"][0]
-                self.assertEqual(attempt["delivery"], "terminal_capture")
-
-    def test_incomplete_capture_retries_the_same_worker_before_degrading(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            project = root / "project"
-            project.mkdir()
-            (project / "code.py").write_text("print('ok')", encoding="utf-8")
-            with self.runtime(root):
-                self.seed_team(root, project, task_role="reviewer", writer_provider="antigravity")
-                with patch.object(bridge, "_ruflo_exec", return_value={"success": True}), patch.object(
-                    bridge, "_cao_post", side_effect=[
-                        # CAO tore the pane down mid-answer: no end marker.
-                        {"status": "completed", "last_message": "Reviewed code.py. Findings"},
-                        {"status": "completed", "last_message": "code.py:1 is fine\nVERDICT: PASS"},
-                    ]
-                ) as cao:
-                    result = bridge.run_ruflo_readonly_task(
-                        "team-safe", "task-safe", "Review", ["code.py"]
-                    )
-                # The designated reviewer keeps the role instead of degrading.
-                self.assertEqual(cao.call_count, 2)
-                self.assertEqual([call.args[0]["provider"] for call in cao.call_args_list],
-                                 ["claude_code", "claude_code"])
-                self.assertEqual(result["provider"], "claude")
-                self.assertTrue(result["review_independent"])
-                state = json.loads((root / "state/teams.json").read_text())
-                attempts = state["teams"]["team-safe"]["tasks"]["task-safe"]["provider_attempts"]
-                self.assertEqual([item["provider"] for item in attempts], ["claude"])
-                self.assertEqual(attempts[0]["capture_retries"], 1)
-
-    def test_quota_failure_is_never_retried_on_the_same_worker(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            project = root / "project"
-            project.mkdir()
-            (project / "code.py").write_text("print('ok')", encoding="utf-8")
-            with self.runtime(root):
-                self.seed_team(root, project, task_role="reviewer", writer_provider="antigravity")
-                with patch.object(bridge, "_ruflo_exec", return_value={"success": True}), patch.object(
-                    bridge, "_cao_post", side_effect=[
-                        bridge.BridgeError("quota"),
-                        {"status": "completed", "last_message": "code.py:1 is fine\nVERDICT: PASS"},
-                    ]
-                ) as cao:
-                    result = bridge.run_ruflo_readonly_task(
-                        "team-safe", "task-safe", "Review", ["code.py"]
-                    )
-                self.assertEqual(cao.call_count, 2)
-                self.assertEqual([call.args[0]["provider"] for call in cao.call_args_list],
-                                 ["claude_code", "codex"])
-                self.assertEqual(result["provider"], "codex")
+                self.assertEqual(task["provider_attempts"][1]["profile"], "ruflo_antigravity_readonly_worker")
 
     def test_reviewer_falls_back_to_writer_and_marks_degraded_review(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -311,7 +216,7 @@ class RufloTeamBridgeTests(unittest.TestCase):
                     ]
                 ) as cao:
                     result = bridge.run_ruflo_readonly_task(
-                        "team-safe", "task-safe", "Review", ["code.py"], "codex"
+                        "team-safe", "task-safe", "Review", ["code.py"]
                     )
                 self.assertEqual(cao.call_count, 3)
                 self.assertEqual([call.args[0]["provider"] for call in cao.call_args_list], ["claude_code", "antigravity_cli", "codex"])
@@ -333,50 +238,17 @@ class RufloTeamBridgeTests(unittest.TestCase):
                 self.seed_team(root, project)
                 with patch.object(bridge, "_ruflo_exec", return_value={"success": True}), patch.object(
                     bridge, "_cao_post", side_effect=[
-                        # An echo is retried once on the same worker, then the
-                        # role moves down the chain; it is never accepted.
-                        {"status": "completed", "last_message": "Return a concise report."},
                         {"status": "completed", "last_message": "Return a concise report."},
                         {"status": "completed", "last_message": "No blocker.\nVERDICT: PASS"},
                     ],
                 ) as cao:
                     result = bridge.run_ruflo_readonly_task(
-                        "team-safe", "task-safe", "Inspect", ["code.py"], "antigravity"
+                        "team-safe", "task-safe", "Inspect", ["code.py"]
                     )
-                self.assertEqual(cao.call_count, 3)
-                self.assertEqual([call.args[0]["provider"] for call in cao.call_args_list],
-                                 ["antigravity_cli", "antigravity_cli", "claude_code"])
-                self.assertEqual(result["provider"], "claude")
+                self.assertEqual(cao.call_count, 2)
+                self.assertEqual(result["provider"], "antigravity")
                 self.assertEqual(result["worker_verdict"], "PASS")
                 self.assertIn("missing VERDICT", result["provider_attempts"][0]["error"])
-
-    def test_verdict_survives_terminal_capture_but_a_bare_prompt_echo_does_not(self):
-        # CAO captures the pane, which collapses the final line into the sentence
-        # before it; a complete answer must still be accepted.
-        collapsed = {"status": "completed", "last_message": "code.py:9 is a narrow edge case.VERDICT:PASS"}
-        self.assertEqual(bridge._worker_verdict(collapsed), "PASS")
-        self.assertIsNone(bridge._provider_error(collapsed))
-        # Teardown appends its own epilogue after the answer, so the marker is not
-        # the end of the capture either.
-        epilogue = {"status": "completed", "last_message":
-                    "code.py:9 is a narrow edge case.VERDICT:PASS\nResume this session with: claude --resume 810d8dd9"}
-        self.assertEqual(bridge._worker_verdict(epilogue), "PASS")
-        # The echoed instruction names both verdicts as one pair, so a capture
-        # holding only the prompt is still refused, wrapped or collapsed.
-        for echoed in (
-            "Task: Review code.py. End with exactly one line: VERDICT: PASS or VERDICT: BLOCKED.",
-            "Endwithexactlyoneline:VERDICT:PASSorVERDICT:BLOCKED.",
-            "End with exactly one line: VERDICT: PASS or VERDICT: BLOCKED. Resume this session with: claude --resume x",
-        ):
-            with self.assertRaisesRegex(bridge.BridgeError, "missing VERDICT"):
-                bridge._worker_verdict({"status": "completed", "last_message": echoed})
-        # A real answer that follows the echoed instruction is still read.
-        answered = {"status": "completed", "last_message":
-                    "End with exactly one line: VERDICT: PASS or VERDICT: BLOCKED. No blocker found.VERDICT: BLOCKED"}
-        self.assertEqual(bridge._worker_verdict(answered), "BLOCKED")
-        truncated = {"status": "completed", "last_message": "1. average_rate raises on an empty list"}
-        with self.assertRaisesRegex(bridge.BridgeError, "missing VERDICT"):
-            bridge._worker_verdict(truncated)
 
     def test_valid_report_may_discuss_quota_errors(self):
         result = {
@@ -610,7 +482,7 @@ class RufloTeamBridgeTests(unittest.TestCase):
                 self.assertTrue(result["review_independent"])
                 self.assertEqual(result["review_mode"], "independent")
 
-    def test_claude_session_reviews_with_codex_and_investigates_with_antigravity(self):
+    def test_a_claude_session_reviews_with_codex_and_investigates_by_itself(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             project = root / "project"
@@ -626,7 +498,10 @@ class RufloTeamBridgeTests(unittest.TestCase):
                 with patch.object(bridge, "_ruflo_exec", return_value={"success": True, "taskId": "inspect-safe"}):
                     investigator = bridge.create_ruflo_task("team-safe", "investigator", "Inspect the change")
                 self.assertEqual(reviewer["provider"], "codex")
-                self.assertEqual(investigator["eligible_providers"][0], "antigravity")
+                # Investigation is the coordinator's own work: no provider is chosen
+                # for it, and none is spent on it.
+                self.assertNotIn("provider", investigator)
+                self.assertNotIn("eligible_providers", investigator)
                 with patch.object(bridge, "_ruflo_exec", return_value={"success": True}), patch.object(
                     bridge, "_cao_post", return_value={"status": "completed", "last_message": "Reviewed\nVERDICT: PASS"}
                 ) as cao:
@@ -634,6 +509,7 @@ class RufloTeamBridgeTests(unittest.TestCase):
                         "team-safe", "review-safe", "Review", ["code.py"]
                     )
                 self.assertEqual(cao.call_args.args[0]["provider"], "codex")
+                self.assertEqual(cao.call_count, 1)
                 self.assertTrue(result["review_independent"])
 
     def test_review_degrades_only_when_every_independent_provider_is_excluded(self):
@@ -664,30 +540,410 @@ class RufloTeamBridgeTests(unittest.TestCase):
                 self.assertFalse(result["review_independent"])
                 self.assertEqual(result["review_mode"], "same_provider_fallback")
 
-    def test_handoff_excludes_exhausted_provider_from_investigation(self):
+    def test_handoff_excludes_the_exhausted_provider_from_review(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             project = root / "project"
             project.mkdir()
             (project / "code.py").write_text("pass", encoding="utf-8")
             with self.runtime(root):
-                self.seed_team(root, project, task_role="investigator", writer_provider="codex")
+                self.seed_team(root, project, task_role="reviewer", writer_provider="codex")
                 bridge.take_over_ruflo_team("team-safe", "antigravity", "Codex quota exhausted")
-                state = json.loads((root / "state/teams.json").read_text())
-                self.assertEqual(
-                    state["teams"]["team-safe"]["tasks"]["task-safe"]["eligible_providers"],
-                    ["claude", "antigravity"],
-                )
                 with patch.object(bridge, "_ruflo_exec", return_value={"success": True}), patch.object(
-                    bridge, "_cao_post", return_value={"status": "completed", "last_message": "Inspected\nVERDICT: PASS"}
+                    bridge, "_cao_post", return_value={"status": "completed", "last_message": "Reviewed\nVERDICT: PASS"}
                 ) as cao:
-                    # An explicit preference for the exhausted provider is skipped, not probed.
+                    # The exhausted provider is skipped, never probed again.
                     result = bridge.run_ruflo_readonly_task(
-                        "team-safe", "task-safe", "Inspect", ["code.py"], "codex"
+                        "team-safe", "task-safe", "Review", ["code.py"]
                     )
                 self.assertEqual(result["provider"], "claude")
                 self.assertEqual(cao.call_count, 1)
                 self.assertEqual(cao.call_args.args[0]["provider"], "claude_code")
+
+    def report_path(self, root: Path) -> Path:
+        return root / "runs" / "team-safe" / "task-safe" / bridge.REPORT_NAME
+
+    def test_report_delivered_after_the_pane_looked_finished_is_still_the_answer(self):
+        """The failure this guards: CAO ends a step at the first pane read that
+        looks complete, so a worker that announces itself before working is cut
+        off with only its preamble captured. The worker keeps running and
+        delivers out of band, and that delivery is the answer."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            project = root / "project"
+            project.mkdir()
+            (project / "code.py").write_text("print('ok')", encoding="utf-8")
+            report = self.report_path(root)
+
+            def cao(body, timeout=660):
+                # The pane holds a preamble and a spinner, never a verdict.
+                report.parent.mkdir(parents=True, exist_ok=True)
+                report.write_text(
+                    json.dumps({"verdict": "BLOCKED", "report": "code.py:1 leaks a handle"}),
+                    encoding="utf-8",
+                )
+                return {
+                    "terminal_id": "term-1",
+                    "status": "completed",
+                    "last_message": "\u2022 Reading code.py\n\u2022 Working (5s \u2022 esc to interrupt)",
+                }
+
+            with self.runtime(root):
+                self.seed_team(root, project, task_role="reviewer", writer_provider="claude")
+                with patch.object(bridge, "_ruflo_exec", return_value={"success": True}), patch.object(
+                    bridge, "_cao_post", side_effect=cao
+                ), patch.object(bridge, "_release_terminal") as release:
+                    result = bridge.run_ruflo_readonly_task(
+                        "team-safe", "task-safe", "Review", ["code.py"]
+                    )
+            self.assertEqual(result["provider"], "codex")
+            self.assertEqual(result["worker_verdict"], "BLOCKED")
+            self.assertEqual(result["result"], "code.py:1 leaks a handle")
+            self.assertEqual(result["provider_attempts"][0]["delivery"], "report_channel")
+            self.assertFalse(result["fallback_used"])
+            release.assert_called_once_with("term-1")
+
+    def test_step_never_tears_down_its_own_terminal(self):
+        """Teardown belongs to the bridge: CAO's would fire while the worker is
+        still writing its report."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            project = root / "project"
+            project.mkdir()
+            (project / "code.py").write_text("print('ok')", encoding="utf-8")
+            with self.runtime(root):
+                self.seed_team(root, project, task_role="reviewer", writer_provider="claude")
+                with patch.object(bridge, "_ruflo_exec", return_value={"success": True}), patch.object(
+                    bridge, "_cao_post", return_value={"status": "completed", "last_message": "ok\nVERDICT: PASS"}
+                ) as cao, patch.object(bridge, "_release_terminal"):
+                    bridge.run_ruflo_readonly_task("team-safe", "task-safe", "Review", ["code.py"])
+            self.assertFalse(cao.call_args.args[0]["teardown"])
+
+    def test_terminal_kept_alive_by_the_bridge_is_released_when_the_worker_fails(self):
+        """A step that fails still names its terminal; nothing else will reap it."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            project = root / "project"
+            project.mkdir()
+            (project / "code.py").write_text("print('ok')", encoding="utf-8")
+            failure = bridge.BridgeError("CAO HTTP 504: ran long")
+            failure.terminal_id = "term-stuck"
+            with self.runtime(root):
+                self.seed_team(root, project, task_role="reviewer", writer_provider="claude")
+                with patch.object(bridge, "_ruflo_exec", return_value={"success": True}), patch.object(
+                    bridge, "_cao_post", side_effect=[failure, {"status": "completed", "last_message": "ok\nVERDICT: PASS"}]
+                ), patch.object(bridge, "_release_terminal") as release:
+                    result = bridge.run_ruflo_readonly_task(
+                        "team-safe", "task-safe", "Review", ["code.py"]
+                    )
+            self.assertEqual(result["provider"], "antigravity")
+            release.assert_called_once_with("term-stuck")
+
+    def test_failed_step_body_yields_the_terminal_it_left_running(self):
+        detail = json.dumps({"detail": {"message": "ran long", "kind": "timeout", "terminal_id": "term-9"}})
+        self.assertEqual(bridge._terminal_id_from_detail(detail), "term-9")
+        self.assertIsNone(bridge._terminal_id_from_detail("not json"))
+        self.assertIsNone(bridge._terminal_id_from_detail(json.dumps({"detail": "plain"})))
+
+    def test_codex_worker_is_not_told_it_holds_tools_it_does_not_have(self):
+        """CAO translates the tool vocabulary only for providers it maps; codex
+        is not one, so its list reaches the worker verbatim. Naming fs_read and
+        fs_list there made codex answer that it could not read the snapshot."""
+        codex_tools = bridge.PROVIDERS["codex"]["tools"]
+        # Named twice wrong already: CAO's `fs_read`/`fs_list`, then `shell`,
+        # which is not a codex tool either. `exec_command` is how codex reads.
+        self.assertNotIn("fs_read", codex_tools)
+        self.assertNotIn("fs_list", codex_tools)
+        self.assertNotIn("shell", codex_tools)
+        self.assertIn("exec_command", codex_tools)
+        for name, provider in bridge.PROVIDERS.items():
+            self.assertTrue(provider["tools"], name)
+
+
+    def test_status_describes_tasks_instead_of_resending_their_reports(self):
+        """A status check is a lookup, not a re-read: the coordinator already saw
+        the report when the task completed, and can get it back from the task's
+        own cache without a provider. Returning tasks whole re-sent 45k
+        characters of finished reports on every check."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            project = root / "project"
+            project.mkdir()
+            with self.runtime(root):
+                self.seed_team(root, project, task_role="reviewer", writer_provider="claude")
+                state = json.loads((root / "state/teams.json").read_text())
+                task = state["teams"]["team-safe"]["tasks"]["task-safe"]
+                task.update({
+                    "status": "completed", "provider": "codex", "result": "R" * 9000,
+                    "worker_verdict": "BLOCKED", "review_mode": "independent",
+                    "review_independent": True, "truncated": False,
+                    "provider_attempts": [
+                        {"provider": "antigravity", "status": "unavailable", "error": "quota" * 200},
+                        {"provider": "codex", "status": "completed", "delivery": "report_channel"},
+                    ],
+                })
+                bridge._atomic_json(root / "state/teams.json", state)
+                with patch.object(bridge, "_ruflo_exec", return_value={"success": True}):
+                    status = bridge.get_ruflo_team_status("team-safe")
+                    cached = bridge.run_ruflo_readonly_task(
+                        "team-safe", "task-safe", "Review", []
+                    )
+            digest = status["tasks"][0]
+            self.assertNotIn("result", digest)
+            self.assertNotIn("provider_attempts", digest)
+            self.assertLess(len(json.dumps(status["tasks"])), 1000)
+            # Everything needed to judge the task survives.
+            self.assertEqual(digest["result_chars"], 9000)
+            self.assertEqual(digest["worker_verdict"], "BLOCKED")
+            self.assertEqual(digest["review_mode"], "independent")
+            self.assertEqual(digest["delivery"], "report_channel")
+            self.assertEqual(digest["providers_tried"], ["antigravity:unavailable", "codex:completed"])
+            # And the report itself is one cached call away, with no provider run.
+            self.assertTrue(cached["cached"])
+            self.assertEqual(cached["result"], "R" * 9000)
+
+    def test_status_keeps_the_error_a_blocked_task_cannot_be_judged_without(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            project = root / "project"
+            project.mkdir()
+            with self.runtime(root):
+                self.seed_team(root, project)
+                state = json.loads((root / "state/teams.json").read_text())
+                state["teams"]["team-safe"]["tasks"]["task-safe"].update({
+                    "status": "blocked",
+                    "provider_attempts": [{"provider": "codex", "status": "unavailable", "error": "CAO HTTP 504"}],
+                })
+                bridge._atomic_json(root / "state/teams.json", state)
+                with patch.object(bridge, "_ruflo_exec", return_value={"success": True}):
+                    status = bridge.get_ruflo_team_status("team-safe")
+            self.assertEqual(status["tasks"][0]["last_error"], "CAO HTTP 504")
+
+
+    # --- the review arrives as findings the coordinator can act on one by one ---
+
+    def test_a_finished_review_is_not_lost_to_the_word_chosen_for_its_verdict(self):
+        """Observed: two well-formed findings were rejected because the worker
+        said FAIL instead of BLOCKED, and it did not try again."""
+        for word in ("FAIL", "failed", "Rejected", "blocked"):
+            self.assertEqual(delivery.VERDICT_SYNONYMS[word.upper()], "BLOCKED")
+        for word in ("PASS", "ok", "approved"):
+            self.assertEqual(delivery.VERDICT_SYNONYMS[word.upper()], "PASS")
+
+    def test_a_finding_must_say_how_the_defect_is_reached(self):
+        complete = {
+            "file": "a.ts", "line": 12, "claim": "loses an edit",
+            "reachability": "closing a tab during the 120ms window",
+            "severity": "high",
+        }
+        cleaned = delivery._clean_findings([complete], "BLOCKED")
+        self.assertEqual(cleaned[0]["id"], "f1")
+        self.assertEqual(cleaned[0]["line"], "12")
+        for missing in ("reachability", "severity", "claim", "file"):
+            with self.assertRaises(ValueError) as caught:
+                delivery._clean_findings([{k: v for k, v in complete.items() if k != missing}], "BLOCKED")
+            self.assertIn(missing, str(caught.exception))
+        with self.assertRaises(ValueError):
+            delivery._clean_findings([dict(complete, severity="catastrophic")], "BLOCKED")
+
+    def test_a_review_is_never_discarded_for_having_nothing_to_list(self):
+        """A reviewer that could not inspect the snapshot has exactly that to
+        report. Rejecting the call lost the whole answer, the same way the strict
+        verdict check once did; the emptiness reaches the coordinator instead."""
+        self.assertEqual(delivery._clean_findings([], "BLOCKED"), [])
+        self.assertEqual(delivery._clean_findings([], "PASS"), [])
+
+    def test_findings_reach_the_coordinator_and_are_counted_in_the_status(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            project = root / "project"
+            project.mkdir()
+            (project / "code.py").write_text("print('ok')", encoding="utf-8")
+            report = self.report_path(root)
+            findings = [
+                {"id": "f1", "file": "code.py", "line": "1", "claim": "leaks", "reachability": "normal use", "severity": "high"},
+                {"id": "f2", "file": "code.py", "line": "9", "claim": "races", "reachability": "two tabs", "severity": "low"},
+            ]
+
+            def cao(body, timeout=660):
+                report.parent.mkdir(parents=True, exist_ok=True)
+                report.write_text(json.dumps(
+                    {"verdict": "BLOCKED", "report": "checked code.py", "findings": findings}
+                ), encoding="utf-8")
+                return {"terminal_id": "term-1", "status": "completed", "last_message": "\u2022 Reading"}
+
+            with self.runtime(root):
+                self.seed_team(root, project, task_role="reviewer", writer_provider="claude")
+                with patch.object(bridge, "_ruflo_exec", return_value={"success": True}), patch.object(
+                    bridge, "_cao_post", side_effect=cao
+                ), patch.object(bridge, "_release_terminal"):
+                    result = bridge.run_ruflo_readonly_task("team-safe", "task-safe", "Review", ["code.py"])
+                    with patch.object(bridge, "_ruflo_exec", return_value={"success": True}):
+                        status = bridge.get_ruflo_team_status("team-safe")
+            self.assertEqual([item["id"] for item in result["findings"]], ["f1", "f2"])
+            self.assertEqual(result["findings"][0]["reachability"], "normal use")
+            # The status counts them; it does not reproduce them.
+            digest = status["tasks"][0]
+            self.assertEqual(digest["findings"], 2)
+            self.assertEqual(digest["findings_by_severity"], {"high": 1, "low": 1})
+            self.assertNotIn("claim", json.dumps(digest))
+
+    def test_a_delivery_that_lands_before_the_step_ends_is_not_waited_out(self):
+        """Measured: a worker delivered at 38s, CAO never recognised its pane as
+        finished, and the answer sat unread until the step timed out at 608s."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            report = root / bridge.REPORT_NAME
+            report.write_text(json.dumps({"verdict": "PASS", "report": "ok", "findings": []}), encoding="utf-8")
+            started = time.monotonic()
+            with patch.object(bridge, "REPORT_POLL_SECONDS", 0.0):
+                # running() stays True: the step is still going, and it does not matter.
+                delivered, stalled = bridge._await_worker_report(
+                    report, root, lambda: True, started + bridge.WORKER_BUDGET_SECONDS
+                )
+            self.assertEqual(delivered["verdict"], "PASS")
+            self.assertFalse(stalled)
+            self.assertLess(time.monotonic() - started, 5)
+
+    def test_a_finished_step_ends_the_wait_at_once(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.assertEqual(
+                bridge._await_worker_report(root / bridge.REPORT_NAME, root, lambda: False, 0.0),
+                (None, False),
+            )
+
+
+    # --- silence is not thinking, and a blocked review is still knowledge -----
+
+    def test_a_worker_that_goes_silent_is_given_up_on_before_the_budget(self):
+        """The pane is refused as a completion signal, not as a heartbeat: a TUI
+        repaints its spinner while it works, so an unchanging pane means nothing
+        is happening. Observed: codex accepted a prompt near its weekly limit and
+        produced not one token for the whole ten-minute budget."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            report = root / bridge.REPORT_NAME
+            with patch.object(bridge, "STALL_SECONDS", 0.0), patch.object(
+                bridge, "REPORT_POLL_SECONDS", 0.0
+            ), patch.object(bridge, "_terminal_for_workspace", return_value="t1"), patch.object(
+                bridge, "_terminal_finished", return_value=False
+            ), patch.object(bridge, "_terminal_output", return_value="frozen pane"):
+                delivered, stalled = bridge._await_worker_report(report, root, lambda: True, time.monotonic() + 60)
+            self.assertIsNone(delivered)
+            self.assertTrue(stalled)
+
+    def test_a_pane_that_keeps_moving_is_never_called_stalled(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            report = root / bridge.REPORT_NAME
+            frames = iter(["working 1s", "working 2s", "working 3s"])
+            with patch.object(bridge, "STALL_SECONDS", 0.0), patch.object(
+                bridge, "REPORT_POLL_SECONDS", 0.0
+            ), patch.object(bridge, "_terminal_for_workspace", return_value="t1"), patch.object(
+                bridge, "_terminal_finished", return_value=False
+            ), patch.object(bridge, "_terminal_output", side_effect=lambda _: next(frames, None)):
+                delivered, stalled = bridge._await_worker_report(report, root, lambda: True, time.monotonic() + 0.05)
+            self.assertIsNone(delivered)
+            self.assertFalse(stalled)
+
+    def test_an_unreadable_pane_is_not_mistaken_for_a_silent_worker(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            report = root / bridge.REPORT_NAME
+            with patch.object(bridge, "STALL_SECONDS", 0.0), patch.object(
+                bridge, "REPORT_POLL_SECONDS", 0.0
+            ), patch.object(bridge, "_terminal_for_workspace", return_value="t1"), patch.object(
+                bridge, "_terminal_finished", return_value=False
+            ), patch.object(bridge, "_terminal_output", return_value=None):
+                delivered, stalled = bridge._await_worker_report(report, root, lambda: True, time.monotonic() + 0.05)
+            self.assertFalse(stalled)
+
+    def seed_completed_review(self, root: Path, project: Path, verdict="BLOCKED", provider="codex"):
+        self.seed_team(root, project, task_role="reviewer", writer_provider="claude")
+        state = json.loads((root / "state/teams.json").read_text())
+        state["teams"]["team-safe"]["tasks"]["task-safe"].update({
+            "status": "completed", "provider": provider, "worker_verdict": verdict,
+            "reviewed_writer_provider": "claude", "result": "checked code.py",
+            "findings": [{"id": "f1", "file": "code.py", "line": "3", "severity": "high",
+                          "claim": "loses an edit", "reachability": "closing a tab mid-window"}],
+            "provider_attempts": [{"provider": provider, "status": "completed"}],
+        })
+        bridge._atomic_json(root / "state/teams.json", state)
+
+    def test_a_blocked_review_is_recorded_without_claiming_anything_is_verified(self):
+        """Recording only verified outcomes kept the successes and threw away the
+        reviews that found something, which is where the knowledge is."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            project = root / "project"
+            project.mkdir()
+            stored = {}
+
+            def execute(tool, params, timeout=45):
+                if tool == "memory_store":
+                    stored.update(params)
+                return {"success": True}
+
+            with self.runtime(root):
+                self.seed_completed_review(root, project)
+                with patch.object(bridge, "_ruflo_exec", side_effect=execute):
+                    result = bridge.record_ruflo_review_outcome("team-safe", "task-safe")
+            self.assertEqual(result["verdict"], "BLOCKED")
+            self.assertEqual(result["findings"], 1)
+            self.assertTrue(result["review_independent"])
+            # Keyed and tagged apart, so a search can never read it as a pass.
+            self.assertTrue(stored["key"].startswith("review:"))
+            self.assertIn("verdict-blocked", stored["tags"])
+            self.assertNotIn("verified", stored["tags"])
+            self.assertEqual(stored["value"]["record_kind"], "review_outcome")
+            self.assertEqual(stored["value"]["findings"][0]["reachability"], "closing a tab mid-window")
+
+    def test_verified_still_needs_more_than_a_review_record(self):
+        """The weaker record must not become a back door into the stronger one."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            project = root / "project"
+            project.mkdir()
+            with self.runtime(root):
+                self.seed_completed_review(root, project, verdict="BLOCKED")
+                with patch.object(bridge, "_ruflo_exec", return_value={"success": True}):
+                    with self.assertRaises(bridge.BridgeError):
+                        bridge.record_ruflo_verified_outcome(
+                            "team-safe", "task-safe", "task-safe", "s", ["code.py"]
+                        )
+
+    def test_a_same_provider_review_is_recorded_as_degraded(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            project = root / "project"
+            project.mkdir()
+            stored = {}
+
+            def execute(tool, params, timeout=45):
+                if tool == "memory_store":
+                    stored.update(params)
+                return {"success": True}
+
+            with self.runtime(root):
+                self.seed_completed_review(root, project, verdict="PASS", provider="claude")
+                with patch.object(bridge, "_ruflo_exec", side_effect=execute):
+                    result = bridge.record_ruflo_review_outcome("team-safe", "task-safe")
+            self.assertFalse(result["review_independent"])
+            self.assertIn("same-provider-fallback", stored["tags"])
+            self.assertEqual(stored["value"]["verification_mode"], "same_provider_fallback")
+
+
+    def test_the_tool_list_matches_the_profile_that_ships_with_it(self):
+        """CAO takes whichever list the caller sends, so the two must agree: the
+        profile said `exec_command` while this table still said `shell`, and the
+        worker believed the table and reported it could not read anything."""
+        profile = Path(__file__).resolve().parents[1] / "CAOProfiles" / "ruflo_codex_readonly_worker.md"
+        if not profile.is_file():
+            self.skipTest("profile not present beside the runtime")
+        head = profile.read_text(encoding="utf-8").split("---\n\n")[0]
+        declared = re.findall(r'^\s*-\s*"([^"]+)"', head.split("allowedTools:")[1].split("mcpServers:")[0], re.M)
+        self.assertEqual(declared, bridge.PROVIDERS["codex"]["tools"])
 
 
 if __name__ == "__main__":

@@ -39,7 +39,7 @@ def main():
     print("Providers detected: "+", ".join(providers)+". Authentication and quota cannot be inferred from installation.")
     if not args.yes and input("Are providers logged in, and may setup register local services and global skills/MCP? [y/N] ").lower()!="y":
         return
-    release=Path.home()/"Library/Application Support/SecondBrainEcosystem/releases"/("0.1.1-"+time.strftime("%Y%m%d-%H%M%S")+"-"+uuid.uuid4().hex[:6])
+    release=Path.home()/"Library/Application Support/SecondBrainEcosystem/releases"/("0.1.2-"+time.strftime("%Y%m%d-%H%M%S")+"-"+uuid.uuid4().hex[:6])
     release.mkdir(parents=True,mode=0o700)
     project=Path(__file__).resolve().parents[1]
     # Build tools may create metadata beside pyproject.toml. Keep the reviewed

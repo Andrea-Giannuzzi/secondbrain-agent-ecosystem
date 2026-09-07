@@ -739,29 +739,153 @@ def withdraw_codex_trust(block):
         return
 
 
+WORKER_BUDGET_SECONDS = 600.0
+REPORT_POLL_SECONDS = 2.0
+REPORT_NAME = "worker-report.json"
+# Refusing to read the pane for COMPLETION is not refusing to read it for LIFE.
+# These TUIs repaint a running spinner, so a pane identical to itself for
+# minutes means nothing is happening -- and unattended, nobody notices a worker
+# that accepted a prompt and then produced nothing for the whole budget.
+STALL_SECONDS = 180.0
+
+
+def terminal_id_from_detail(detail: str):
+    """Read the terminal named by a structured step failure, if it names one."""
+    try:
+        value = json.loads(detail).get("detail")
+    except (AttributeError, json.JSONDecodeError):
+        return None
+    if isinstance(value, dict) and value.get("terminal_id"):
+        return str(value["terminal_id"])
+    return None
+
+
+def terminal_finished(terminal_id: str) -> bool:
+    """True once the worker's terminal is gone or has crashed.
+
+    Only used to stop waiting early, so an unreachable server answers False and
+    the wait falls back to its deadline rather than abandoning a live worker.
+    """
+    try:
+        value = http_json("GET", f"/terminals/{terminal_id}", timeout=30)
+    except urllib.error.HTTPError as exc:
+        return exc.code == 404
+    except (OSError, urllib.error.URLError, json.JSONDecodeError):
+        return False
+    return str(value.get("status", "")).casefold() == "error"
+
+
+def terminal_output(terminal_id: str):
+    """Current pane content, used as a heartbeat and never as an answer.
+
+    None when it cannot be read, so an unreachable server is never mistaken for
+    a silent worker.
+    """
+    try:
+        value = http_json("GET", f"/terminals/{terminal_id}/output?mode=full", timeout=30)
+    except (OSError, urllib.error.URLError, json.JSONDecodeError):
+        return None
+    output = value.get("output")
+    return output if isinstance(output, str) else None
+
+
+def release_terminal(terminal_id: str) -> None:
+    """Tear down the terminal this script kept alive; never fail the run."""
+    try:
+        http_json("DELETE", f"/terminals/{terminal_id}", timeout=60)
+    except (OSError, urllib.error.URLError, json.JSONDecodeError):
+        return
+
+
+def read_worker_output(report: Path):
+    """Return the payload the worker delivered, or None when it delivered none."""
+    try:
+        value = json.loads(report.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    payload = value.get("payload")
+    return payload if isinstance(payload, dict) else None
+
+
+def await_worker_output(report: Path, terminal_id, deadline: float):
+    """Wait for the worker's own delivery; give up early when it goes silent."""
+    if not terminal_id:
+        return read_worker_output(report)
+    last_output = None
+    last_change = time.monotonic()
+    while True:
+        payload = read_worker_output(report)
+        if payload is not None:
+            return payload
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(REPORT_POLL_SECONDS)
+        if terminal_finished(terminal_id):
+            return read_worker_output(report)
+        output = terminal_output(terminal_id)
+        if output is None:
+            continue
+        now = time.monotonic()
+        if output != last_output:
+            last_output, last_change = output, now
+        elif now - last_change >= STALL_SECONDS:
+            return read_worker_output(report)
+
+
 def run_step(workspace: Path, prompt: str, profile: str, provider: str):
+    """Run one CAO step and return the worker's answer, not the pane's shape.
+
+    CAO ends a step at the FIRST pane read that looks finished, with none of the
+    stability it demands of an idle pane, so a worker that prints anything before
+    it starts working is captured mid-thought and torn down: measured at 5s on a
+    ten-minute budget. Here that cost a whole re-run each time, because a
+    truncated answer fails the schema and the caller retries the provider. The
+    step therefore runs WITHOUT teardown, the worker delivers its JSON through
+    the out-of-band tool, and this function owns the terminal's life.
+    """
     if "\n" in prompt or "\r" in prompt:
         raise ValueError("CAO prompt must be one physical line.")
+    report = workspace.parent / REPORT_NAME
+    report.unlink(missing_ok=True)
     body = {
         "provider": provider,
         "agent": profile,
         "prompt": prompt,
-        "teardown": True,
-        "timeout": 600.0,
+        "teardown": False,
+        "timeout": WORKER_BUDGET_SECONDS,
         "working_directory": str(workspace),
     }
     for attempt in range(1, 4):
+        terminal_id = None
+        started = time.monotonic()
         try:
-            return http_json("POST", "/terminals/run-step", body, timeout=660)
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            if exc.code not in {502, 503, 504} or attempt == 3:
-                raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
-            time.sleep(5 * attempt)
+            try:
+                result = http_json("POST", "/terminals/run-step", body, timeout=660)
+                terminal_id = str(result.get("terminal_id") or "") or None
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="replace")
+                terminal_id = terminal_id_from_detail(detail)
+                if exc.code not in {502, 503, 504} or attempt == 3:
+                    raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
+                time.sleep(5 * attempt)
+                continue
+            payload = await_worker_output(
+                report, terminal_id, started + WORKER_BUDGET_SECONDS
+            )
+            if payload is not None:
+                # The delivered object IS the answer; downstream parsing of
+                # last_message is unchanged, it simply no longer reads a pane.
+                result = dict(result, last_message=json.dumps(payload, ensure_ascii=False))
+            return result
         except (urllib.error.URLError, TimeoutError):
             if attempt == 3:
                 raise
             time.sleep(5 * attempt)
+        finally:
+            if terminal_id:
+                release_terminal(terminal_id)
 
 
 def review_order(chain, author):
